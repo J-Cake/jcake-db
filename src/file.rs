@@ -57,6 +57,7 @@ impl StorageBackend for File {
     }
 
     fn index_db(&self) -> crate::Result<(), Error> {
-
+        // Iterate over pages
+        todo!()
     }
 }
