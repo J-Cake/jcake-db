@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::io;
+use std::io::{Cursor, Seek};
 use nom::IResult;
 use nom::bytes::*;
 use nom::combinator::map;
@@ -9,53 +11,103 @@ use nom::number::le_u64;
 use nom::multi::count;
 use nom::sequence::preceded;
 use uuid::Uuid;
-use crate::{BinaryRepresentation, StorageBackend};
-use crate::file::BlockDev;
-
-const PAGE_SIZE: usize = 16_777_216; // 16MiB
+use crate::BinaryRepresentation;
+use crate::crc::{check_crc, crc};
+use crate::file::BlockRead;
+use crate::file::BlockSeek;
+use crate::file::BlockWrite;
 
 pub(crate) struct Page {
 	seq: u64,
-	// objects: Vec<Object>,
-	trailer: Option<PageTrailer>
+	page_size: usize,
+	trailer: Option<PageTrailer>,
+	created: chrono::DateTime<chrono::Utc>
 }
 
-impl<Backend: BlockDev> BinaryRepresentation<Backend> for Page {
-	fn read_struct(backend: &mut Backend) -> crate::Result<Self> where Self: Sized {
-		let header = backend.block_read(16)?;
-		let seq = match parse_header(&header) {
-			Ok((_, seq)) => seq,
+impl Page {
+	pub(crate) fn new(seq: u64, size: usize) -> Page {
+		Self {
+			seq,
+			page_size: size,
+			trailer: None,
+			created: chrono::Utc::now()
+		}
+	}
+}
+
+impl BinaryRepresentation for Page {
+	fn read_struct(mut backend: impl BlockRead + BlockSeek) -> crate::Result<Self> where Self: Sized {
+		let input = backend.block_read(24)?;
+		let header: IResult<&[u8], (u64, u32, u64, u32)> = preceded(tag(&b"page"[..]), (le_u64(), le_u32(), le_u64(), le_u32()))
+				.parse_complete(&input);
+
+		let mut header = match header {
+			Ok((_, (seq, len, created, crc))) if check_crc(&input[0..20], crc) => Self {
+				seq,
+				page_size: len as usize,
+				trailer: None,
+				created: chrono::DateTime::from_timestamp_micros(created as i64)
+					.ok_or_else(|| crate::Error::new("Unable to get current time"))?
+			},
+			Ok((_, (seq, _, _, _))) => return Err(crate::Error::new(format!("Page {seq} corrupt."))),
 			Err(err) => return Err(crate::Error::new(err.to_string()))
 		};
 
-		backend.block_seek(PAGE_SIZE as isize - 16)?;
-		let trailer = PageTrailer::read_struct(backend).ok();
+		backend.block_seek(header.page_size as isize - 16)?;
+		if let Some(trailer) = PageTrailer::read_struct(backend).ok() {
+			header.trailer.replace(trailer);
+		}
 
-		Ok(Self {
-			seq,
-			// objects: vec![],
-			trailer,
-		})
+		Ok(header)
 	}
 
-	fn write_struct(&self, backend: &mut Backend) -> crate::Result<()> {
-		todo!()
+	fn write_struct(&self, mut backend: impl BlockWrite + BlockSeek) -> crate::Result<()> {
+		let start = backend.stream_position()?;
+		let mut buf = vec![];
+
+		buf.extend_from_slice(&b"page"[..]);
+		buf.extend_from_slice(&self.seq.to_le_bytes());
+		buf.extend_from_slice(&(self.created.timestamp_micros() as u64).to_le_bytes());
+		buf.extend_from_slice(crc(&buf).as_slice());
+
+		backend.block_write(buf)?;
+
+		let Some(ref trailer) = self.trailer else {
+			return Ok(());
+		};
+
+		if let Some(ref summary) = trailer.summary && summary.len() != trailer.num_items {
+			return Err(crate::Error::new("Summary length does not match reported object count."));
+		}
+
+		let travelled = backend.stream_position()? - start;
+
+		let mut buf = Cursor::new(if let Some(ref summary) = trailer.summary {
+			serialise_summary(summary)
+		} else {
+			// TODO: While we're at it, we might as well produce a summary
+			vec![]
+		});
+
+		buf.seek(io::SeekFrom::End(0))?;
+		trailer.write_struct(&mut buf)?;
+
+		dbg!(buf.get_ref());
+
+		backend.block_seek(self.page_size as isize - travelled as isize)?;
+		backend.block_write(buf.into_inner())?;
+
+		Ok(())
 	}
-}
-
-fn parse_header(input: &[u8]) -> IResult<&[u8], u64> {
-	let (input, (seq, crc)) = preceded(tag(&b"page"[..]), (le_u64(), le_u32()))
-		.parse(input)?;
-
-	Ok((input, seq))
 }
 
 struct PageTrailer {
-	summary: Option<HashMap<Uuid, u32>>
+	summary: Option<HashMap<Uuid, u32>>,
+	num_items: usize
 }
 
-impl<Block: BlockDev> BinaryRepresentation<Block> for PageTrailer {
-	fn read_struct(backend: &mut Block) -> crate::Result<Self> where Self: Sized {
+impl BinaryRepresentation for PageTrailer {
+	fn read_struct(mut backend: impl BlockRead + BlockSeek) -> crate::Result<Self> where Self: Sized {
 		let trailer = backend.block_read(12)?;
 		let len = match parse_trailer(&trailer) {
 			Ok((_, len)) => len,
@@ -65,6 +117,7 @@ impl<Block: BlockDev> BinaryRepresentation<Block> for PageTrailer {
 		if len <= 0 {
 			return Ok(Self {
 				summary: None,
+				num_items: 0
 			});
 		}
 
@@ -77,11 +130,21 @@ impl<Block: BlockDev> BinaryRepresentation<Block> for PageTrailer {
 
 		Ok(Self {
 			summary: if summary.is_empty() { None } else { Some(summary) },
+			num_items: len
 		})
 	}
 
-	fn write_struct(&self, backend: &mut Block) -> crate::Result<()> {
-		todo!()
+	/// PageTrailer does not serialise the summary.
+	fn write_struct(&self, mut backend: impl BlockWrite + BlockSeek) -> crate::Result<()> {
+		let mut buf = vec![];
+
+		buf.extend_from_slice(&b"foot"[..]);
+		buf.extend_from_slice(&(self.num_items as u32).to_le_bytes());
+		buf.extend_from_slice(crc(&buf[..]).as_slice());
+
+		backend.block_write(buf)?;
+
+		Ok(())
 	}
 }
 
@@ -102,4 +165,23 @@ fn parse_summary(input: &[u8], entries: usize) -> IResult<&[u8], HashMap<Uuid, u
 		.map_err(|err| nom::Err::Error(nom::error::Error::new(input, ErrorKind::IsNot)))?;
 
 	Ok((input, map))
+}
+
+fn serialise_summary(summary: &HashMap<Uuid, u32>) -> Vec<u8> {
+	let mut buf = vec![];
+
+	if summary.is_empty() {
+		return buf;
+	}
+
+	buf.extend_from_slice(&b"smry"[..]);
+
+	for (uuid, offset) in summary {
+		buf.extend_from_slice(uuid.as_bytes());
+		buf.extend_from_slice(&offset.to_le_bytes());
+	}
+
+	buf.extend_from_slice(crc(&buf).as_slice());
+
+	buf
 }
