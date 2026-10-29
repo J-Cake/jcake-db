@@ -8,6 +8,7 @@ mod crc;
 mod object;
 mod io_utils;
 
+use std::path::Path;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -22,7 +23,7 @@ pub(crate) type Result<T, Error = crate::Error> = std::result::Result<T, Error>;
 pub trait ObjectStore {
     fn compact_db(&mut self) -> Result<()>;
 
-    fn search(&mut self, id: Uuid) -> Result<Option<Object>>;
+    fn search(&self, id: Uuid) -> Result<Option<Object>>;
     fn insert(&mut self, data: &[u8]) -> Result<Uuid>;
     fn update(&mut self, id: Uuid, data: &[u8]) -> Result<()>;
     fn delete(&mut self, id: Uuid) -> Result<()>;
@@ -31,12 +32,20 @@ pub trait ObjectStore {
 pub struct TypedDatabase(Box<dyn ObjectStore>);
 
 impl TypedDatabase {
-    fn insert(&mut self, data: impl Serialize) -> Result<Uuid> {
+    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
+        if path.as_ref().exists() {
+            Ok(Self(Box::new(BlockDriver::open(path)?)))
+        } else {
+            Ok(Self(Box::new(BlockDriver::blank(path)?)))
+        }
+    }
+
+    pub fn insert(&mut self, data: impl Serialize) -> Result<Uuid> {
         let obj = jsonb::to_owned_jsonb(&data)?;
         self.0.insert(&obj.as_ref())
     }
 
-    fn search<T: DeserializeOwned>(&mut self, id: Uuid) -> Result<Option<T>> {
+    pub fn search<T: DeserializeOwned>(&self, id: Uuid) -> Result<Option<T>> {
         let Some(obj) = self.0.search(id)? else {
             return Ok(None);
         };

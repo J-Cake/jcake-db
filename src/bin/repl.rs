@@ -1,13 +1,19 @@
-use db::BlockDriver;
+use serde::Serialize;
+use serde::Deserialize;
+use uuid::Uuid;
+use db::TypedDatabase;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Message {
+    message: String
+}
 
 type Result<T, Error = db::Error> = core::result::Result<T, Error>;
 
 pub fn main() -> Result<()> {
-    let file = BlockDriver::blank("/tmp/fs.db")?;
+    let db = TypedDatabase::new("/tmp/fs.db")?;
 
-    dbg!(&file.path());
-
-
+    dbg!(db.search::<Message>(Uuid::new_v4())?);
 
     Ok(())
 }

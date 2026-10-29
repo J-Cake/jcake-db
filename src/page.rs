@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::BinaryRepresentation;
 use crate::crc::{check_crc, crc};
 use crate::io_utils::{Device, StickyFile};
+use crate::object::Object;
 
 pub(crate) struct Page {
 	seq: u64,
@@ -37,17 +38,29 @@ impl Page {
 	}
 
 	pub(crate) fn count_records(&self, read: &StickyFile<impl Device>) -> usize {
-		if let Some(ref summary) = self.trailer.and_then(|trailer| trailer.summary) {
+		if let Some(summary) = self.trailer.as_ref()
+			.and_then(|trailer| trailer.summary.as_ref()) {
 			return summary.len();
 		}
 
+		read.seek_by(28);
 
+		let mut count = 0usize;
+		for obj in 0usize..(self.page_size / 28) {
+			if let Ok(obj) = Object::read_struct(read) {
+				count += obj.len();
+			} else {
+				break;
+			}
+		}
+
+		count
 	}
 }
 
 impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
 	fn read_struct(backend: &StickyFile<Dev>) -> crate::Result<Self> where Self: Sized {
-		let input = backend.read(24)?;
+		let input = backend.read(28)?;
 		let header: IResult<&[u8], (u64, u32, u64, u32)> = preceded(tag(&b"page"[..]), (le_u64(), le_u32(), le_u64(), le_u32()))
 				.parse_complete(&input);
 

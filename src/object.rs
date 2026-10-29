@@ -3,10 +3,11 @@ use nom::bytes::{tag, take};
 use nom::{IResult, Parser};
 use nom::combinator::map;
 use nom::error::ErrorKind;
-use nom::number::{le_u24, u8};
+use nom::number::{le_u24, le_u32, u8};
 use nom::sequence::preceded;
 use uuid::Uuid;
 use crate::BinaryRepresentation;
+use crate::crc::check_crc;
 use crate::io_utils::{Device, StickyFile};
 
 #[repr(u8)]
@@ -32,9 +33,9 @@ impl TryFrom<u8> for ObjectKind {
 	}
 }
 
-pub(crate) struct Object {
-	uuid: Uuid,
-	length: usize,
+pub struct Object {
+	pub uuid: Uuid,
+	pub length: usize,
 	kind: ObjectKind,
 	data: ObjectData
 }
@@ -57,7 +58,7 @@ impl std::ops::Deref for Object {
 
 impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Object {
 	fn read_struct(backend: &StickyFile<Dev>) -> crate::Result<Self> where Self: Sized {
-		let input = backend.read(20)?;
+		let input = backend.read(24)?;
 		let obj = try {
 			let (input, uuid) = map(take(16usize), Uuid::from_slice)
 				.parse(&input)?;
@@ -65,13 +66,17 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Object {
 			let uuid =
 				uuid.map_err(|err| nom::Err::Error(nom::error::Error::new(input, ErrorKind::IsNot)))?;
 
-			let (_, (len, flags)) = (le_u24(), u8())
+			let (_, (len, flags, crc)) = (le_u24(), u8(), le_u32())
 				.parse_complete(input)?;
 
-			(uuid, len as usize, flags)
+			(uuid, len as usize, flags, crc)
 		};
 
-		let (uuid, len, flags) = obj.map_err(|err| crate::Error::new(err.to_string()))?;
+		let (uuid, len, flags, crc) = obj.map_err(|err| crate::Error::new(err.to_string()))?;
+
+		if !check_crc(&input[0..20], crc) {
+			return Err(crate::Error::new(format!("Object {uuid} is corrupt.")));
+		}
 
 		let data = backend.read(len)?;
 

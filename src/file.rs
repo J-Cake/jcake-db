@@ -39,7 +39,6 @@ impl BlockDriver<StickyFile<fs::File>> {
         let file = StickyFile::new(OpenOptions::new()
             .read(true)
             .write(true)
-            .truncate(true)
             .create(true)
             .open(path.as_ref())?);
 
@@ -176,7 +175,7 @@ where
         todo!()
     }
 
-    fn search(&mut self, id: Uuid) -> Result<Option<Object>> {
+    fn search(&self, id: Uuid) -> Result<Option<Object>> {
         todo!()
     }
 
