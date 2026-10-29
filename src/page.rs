@@ -10,6 +10,7 @@ use nom::multi::count;
 use nom::sequence::preceded;
 use uuid::Uuid;
 use crate::{BinaryRepresentation, StorageBackend};
+use crate::file::BlockDev;
 
 const PAGE_SIZE: usize = 16_777_216; // 16MiB
 
@@ -19,15 +20,15 @@ pub(crate) struct Page {
 	trailer: Option<PageTrailer>
 }
 
-impl<Backend: StorageBackend> BinaryRepresentation<Backend> for Page {
+impl<Backend: BlockDev> BinaryRepresentation<Backend> for Page {
 	fn read_struct(backend: &mut Backend) -> crate::Result<Self> where Self: Sized {
-		let header = backend.read(16)?;
+		let header = backend.block_read(16)?;
 		let seq = match parse_header(&header) {
 			Ok((_, seq)) => seq,
 			Err(err) => return Err(crate::Error::new(err.to_string()))
 		};
 
-		backend.seek(PAGE_SIZE as isize - 16)?;
+		backend.block_seek(PAGE_SIZE as isize - 16)?;
 		let trailer = PageTrailer::read_struct(backend).ok();
 
 		Ok(Self {
@@ -53,9 +54,9 @@ struct PageTrailer {
 	summary: Option<HashMap<Uuid, u32>>
 }
 
-impl<Backend: StorageBackend> BinaryRepresentation<Backend> for PageTrailer {
-	fn read_struct(backend: &mut Backend) -> crate::Result<Self> where Self: Sized {
-		let trailer = backend.read(12)?;
+impl<Block: BlockDev> BinaryRepresentation<Block> for PageTrailer {
+	fn read_struct(backend: &mut Block) -> crate::Result<Self> where Self: Sized {
+		let trailer = backend.block_read(12)?;
 		let len = match parse_trailer(&trailer) {
 			Ok((_, len)) => len,
 			Err(err) => return Err(crate::Error::new(err.to_string()))
@@ -67,8 +68,8 @@ impl<Backend: StorageBackend> BinaryRepresentation<Backend> for PageTrailer {
 			});
 		}
 
-		backend.seek(0 - (20 * len + 16) as isize)?;
-		let summary = backend.read(20 * len + 4)?;
+		backend.block_seek(0 - (20 * len + 16) as isize)?;
+		let summary = backend.block_read(20 * len + 4)?;
 		let summary = match parse_summary(&summary, len) {
 			Ok((_, summary)) => summary,
 			Err(err) => return Err(crate::Error::new(err.to_string()))
@@ -79,7 +80,7 @@ impl<Backend: StorageBackend> BinaryRepresentation<Backend> for PageTrailer {
 		})
 	}
 
-	fn write_struct(&self, backend: &mut Backend) -> crate::Result<()> {
+	fn write_struct(&self, backend: &mut Block) -> crate::Result<()> {
 		todo!()
 	}
 }

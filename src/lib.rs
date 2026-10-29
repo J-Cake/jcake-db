@@ -1,27 +1,26 @@
+#![feature(try_blocks)]
+
 mod file;
-mod superblock;
+// mod superblock;
 mod error;
 mod block;
 mod page;
+mod crc;
 
-use std::io;
-use std::io::Bytes;
 pub use error::Error;
-pub use file::File;
+pub use file::BlockDriver;
+use crate::file::BlockDev;
+use crate::crc::{crc, Crc};
 
 pub(crate) type Result<T, Error = crate::Error> = std::result::Result<T, Error>;
 
 pub trait StorageBackend {
-    fn initialise(self) -> Result<Self> where Self: Sized;
+    // fn initialise(self) -> Result<Self> where Self: Sized;
 
     fn index_db(&self) -> Result<(), Error>;
-
-    fn read(&mut self, len: usize) -> Result<Box<[u8]>>;
-    fn write(&mut self, buffer: impl AsRef<[u8]>) -> Result<()>;
-    fn seek(&mut self, by: isize) -> Result<()>;
 }
 
-pub(crate) trait BinaryRepresentation<Backend: StorageBackend> {
-    fn read_struct(backend: &mut Backend) -> Result<Self> where Self: Sized;
-    fn write_struct(&self, backend: &mut Backend) -> Result<()>;
+pub(crate) trait BinaryRepresentation<Block: BlockDev> {
+    fn read_struct(backend: &mut Block) -> Result<Self> where Self: Sized;
+    fn write_struct(&self, backend: &mut Block) -> Result<()>;
 }

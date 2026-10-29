@@ -1,19 +1,12 @@
-use nom::bytes::*;
-use nom::combinator::*;
-use nom::number::le_u32;
-use nom::{IResult, Parser};
-use nom::error::ErrorKind;
-use nom::sequence::preceded;
+
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::StorageBackend;
 use crate::BinaryRepresentation;
 use crate::Result;
 
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Superblock {
-    uuid: Uuid,
-    version: u32,
-    block_size: u32,
-    block_offset: u32,
     crc: u32,
 }
 
@@ -28,11 +21,15 @@ impl<Backend: StorageBackend> BinaryRepresentation<Backend> for Superblock {
     }
 
     fn write_struct(&self, backend: &mut Backend) -> Result<()> {
-        let mut vec = Vec::with_capacity(28);
+        backend.seek(0)?;
+
+        let mut vec = Vec::with_capacity(36);
         vec.extend_from_slice(&b"fsdb"[..]);
         vec.extend_from_slice(self.uuid.as_bytes());
         vec.extend_from_slice(&self.version.to_le_bytes()[..]);
         vec.extend_from_slice(&self.block_size.to_le_bytes()[..]);
+        vec.extend_from_slice(&self.block_offset.to_le_bytes()[..]);
+        vec.extend_from_slice(&crate::crc(&vec[0..32]).to_le_bytes()[..]);
 
         backend.write(vec)?;
 
@@ -48,6 +45,17 @@ impl Superblock {
             block_size: 0,
             block_offset: 0,
             crc: 0,
+        }
+    }
+
+    pub(crate) fn from_read(mut backing: impl Read + Seek) -> Result<Self> {
+        let mut buf = vec![0u8; 36];
+        backing.seek(SeekFrom::Start(0))?;
+        backing.read(&mut buf)?;
+
+        match parse(&buf) {
+            Ok((_, block)) => Ok(block),
+            Err(err) => Err(crate::Error::new(err.to_string())),
         }
     }
 }

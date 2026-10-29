@@ -12,9 +12,7 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {
-
-}
+impl std::error::Error for Error {}
 
 impl Error {
     pub fn new(msg: impl AsRef<str>) -> Self {
