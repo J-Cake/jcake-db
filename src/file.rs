@@ -9,8 +9,9 @@ use std::{fs, io};
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::BinaryRepresentation;
+use crate::{BinaryRepresentation, ObjectStore, Error};
 use crate::crc::check_crc;
 use crate::page::Page;
 
@@ -130,5 +131,23 @@ impl BlockDriver<fs::File> {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl<BlockDev> ObjectStore for BlockDriver<BlockDev> {
+    fn index_db(&self) -> crate::Result<(), Error> {
+        todo!()
+    }
+
+    fn compact_db(&mut self) -> crate::Result<()> {
+        todo!()
+    }
+
+    fn append_object(&mut self, obj: &[u8]) -> crate::Result<Uuid> {
+        todo!()
+    }
+
+    fn search_object(&mut self, obj: Uuid) -> Option<Box<[u8]>> {
+        todo!()
     }
 }

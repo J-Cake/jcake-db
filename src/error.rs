@@ -27,3 +27,9 @@ impl From<std::io::Error> for Error {
         Self::new(value.to_string())
     }
 }
+
+impl From<jsonb::Error> for Error {
+    fn from(value: jsonb::Error) -> Self {
+        Self::new(format!("Deserialisation error: {msg}", msg=value.to_string()))
+    }
+}
