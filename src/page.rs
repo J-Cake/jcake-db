@@ -21,15 +21,19 @@ use crate::object::{Object, ObjectHeader};
 
 pub(crate) struct Page {
 	seq: u64,
+	page_offset: u64,
 	page_size: usize,
 	trailer: Option<PageTrailer>,
-	created: chrono::DateTime<chrono::Utc>
+	created: chrono::DateTime<chrono::Utc>,
 }
 
 impl Page {
+	pub(crate) const PAGE_OFFSET: u64 = 0x1_0000;
+
 	pub(crate) fn new(seq: u64, size: usize) -> Page {
 		Self {
 			seq,
+			page_offset: Self::PAGE_OFFSET + seq * size as u64,
 			page_size: size,
 			trailer: None,
 			created: chrono::Utc::now()
@@ -68,6 +72,13 @@ impl Page {
 			backing: &dev
 		}
 	}
+
+	pub(crate) fn get_object_at(&self, offset: Offset, dev: &StickyFile<impl Device>) -> Result<Option<Object>> {
+		dev.seek_to(self.page_offset as i64 + offset as i64);
+		let header = ObjectHeader::read_struct(dev)?;
+
+		Object::from_header(header, dev)
+	}
 }
 
 pub(crate) struct PageIter<'a, Dev: Device> {
@@ -92,21 +103,23 @@ impl<'a, Dev: Device> Iterator for PageIter<'a, StickyFile<Dev>> {
 }
 
 impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
-	fn read_struct(backend: &StickyFile<Dev>) -> crate::Result<Self> where Self: Sized {
+	fn read_struct(backend: &StickyFile<Dev>) -> Result<Self> where Self: Sized {
+		let page_offset = backend.position() as u64;
 		let input = backend.read(28)?;
 		let header: IResult<&[u8], (u64, u32, u64, u32)> = preceded(tag(&b"page"[..]), (le_u64(), le_u32(), le_u64(), le_u32()))
 				.parse_complete(&input);
 
 		let mut header = match header {
-			Ok((_, (seq, page_size, created, crc))) if check_crc(&input[0..20], crc) => Self {
+			Ok((_, (seq, page_size, created, crc))) if check_crc(&input[0..24], crc) => Self {
 				seq,
+				page_offset,
 				page_size: page_size as usize,
 				trailer: None,
 				created: chrono::DateTime::from_timestamp_micros(created as i64)
-					.ok_or_else(|| crate::Error::new("Unable to get current time"))?
+					.ok_or_else(|| Error::new("Unable to get current time"))?
 			},
-			Ok((_, (seq, _, _, _))) => return Err(crate::Error::new(format!("Page {seq} corrupt."))),
-			Err(err) => return Err(crate::Error::new(err.to_string()))
+			Ok((_, (seq, _, _, _))) => return Err(Error::new(format!("Page {seq} corrupt."))),
+			Err(err) => return Err(Error::new(err.to_string()))
 		};
 
 		backend.seek_by(header.page_size as i64 - 16);

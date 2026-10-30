@@ -13,7 +13,7 @@ use nom::sequence::preceded;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
-use std::hash::BuildHasherDefault;
+use std::hash::{BuildHasher, BuildHasherDefault};
 use std::hash::Hasher;
 use std::path::Path;
 use std::path::PathBuf;
@@ -95,9 +95,9 @@ impl BlockDriver<StickyFile<fs::File>> {
             uuid: Uuid::new_v4(),
             version: 0,
             page_size: BlockDriver::PAGE_SIZE as u32,
-            page_offset: 0x0001_0000u32,
+            page_offset: Page::PAGE_OFFSET as u32,
 
-            index: None
+            index: Some(Index::with_hasher(BuildHasherDefault::new()))
         };
 
         let mut vec = Vec::new();
@@ -126,8 +126,8 @@ impl BlockDriver<StickyFile<fs::File>> {
 
 impl<BlockDev: Device> BlockDriver<StickyFile<BlockDev>> {
     fn load_page(&self, page_number: usize) -> Result<Page> {
-        let offset = self.page_offset as i64 * page_number as i64 * self.page_size as i64;
-        self.backing.seek_by(offset);
+        let offset = self.page_offset as i64 + page_number as i64 * self.page_size as i64;
+        self.backing.seek_to(offset);
 
         Ok(Page::read_struct(&self.backing)?)
     }
@@ -201,16 +201,22 @@ impl Location {
 
 type Index = HashMap<u128, Location, BuildHasherDefault<FoldHasher>>;
 
-impl<BlockDev> ObjectStore for BlockDriver<BlockDev>
-where
-    BlockDev: Device
-{
+impl<BlockDev: Device> ObjectStore for BlockDriver<StickyFile<BlockDev>> {
     fn compact_db(&mut self) -> Result<()> {
         todo!()
     }
 
     fn search(&self, id: Uuid) -> Result<Option<Object>> {
-        todo!()
+        let Some(ref index) = self.index else {
+            return Err(crate::Error::new("Database is not indexed properly. Please re-open the database"));
+        };
+
+        let Some(location) = index.get(&id.as_u128()) else {
+            return Ok(None);
+        };
+
+        let page = self.load_page(location.latest().0 as usize)?;
+        page.get_object_at(location.latest().1 as u32, &self.backing)
     }
 
     fn insert(&mut self, data: &[u8]) -> Result<Uuid> {

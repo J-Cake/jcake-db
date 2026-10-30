@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::Result;
 use crate::Error;
 use crate::BinaryRepresentation;
-use crate::crc::check_crc;
+use crate::crc::{check_crc, Crc};
 use crate::file::Offset;
 use crate::io_utils::{Device, StickyFile};
 
@@ -46,7 +46,8 @@ pub(crate) struct ObjectHeader {
 	pub(crate) uuid: Uuid,
 	pub(crate) length: usize,
 	pub(crate) kind: ObjectKind,
-	pub(crate) offset: Offset
+	pub(crate) offset: Offset,
+	crc: u32,
 }
 
 impl ObjectHeader {
@@ -55,7 +56,8 @@ impl ObjectHeader {
 	}
 
 	pub(crate) fn into_object(self, dev: &StickyFile<impl Device>) -> Result<Object> {
-		Object::from_header(self, dev)
+		Object::from_header(self, dev)?
+			.ok_or(Error::new("Attempted to construct object from invalid header"))
 	}
 }
 impl Object {
@@ -63,14 +65,24 @@ impl Object {
 		self.header.length
 	}
 
-	pub(crate) fn from_header(header: ObjectHeader, dev: &StickyFile<impl Device>) -> Result<Self> {
+	pub(crate) fn from_header(header: ObjectHeader, dev: &StickyFile<impl Device>) -> Result<Option<Self>> {
 		dev.seek_to(header.offset as i64 + 24);
-		let body = dev.read(header.length)?;
+		let data = dev.read(header.length)?;
 
-		Ok(Self {
-			header,
-			data: ObjectData::Owned(body)
-		})
+		let mut crc = Crc::new();
+
+		crc.update(header.uuid.as_bytes());
+		crc.update(header.length.to_le_bytes());
+		crc.update(&data);
+
+		if crc.finish() == header.crc.to_le_bytes() {
+			Ok(Some(Self {
+				header,
+				data: ObjectData::Owned(data)
+			}))
+		} else {
+			Ok(None)
+		}
 	}
 }
 
@@ -118,6 +130,7 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for ObjectHeader {
 		Ok(ObjectHeader {
 			length: len,
 			uuid,
+			crc,
 			kind: flags.try_into()?,
 			offset: offset as u32
 		})
