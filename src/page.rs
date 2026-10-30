@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::io;
-use std::io::{Cursor, Seek};
 use nom::IResult;
 use nom::bytes::*;
 use nom::combinator::map;
@@ -11,10 +9,15 @@ use nom::number::le_u64;
 use nom::multi::count;
 use nom::sequence::preceded;
 use uuid::Uuid;
+use crate::Result;
+use crate::Error;
 use crate::BinaryRepresentation;
-use crate::crc::{check_crc, crc};
-use crate::io_utils::{Device, StickyFile};
-use crate::object::Object;
+use crate::crc::check_crc;
+use crate::crc::crc;
+use crate::file::Offset;
+use crate::io_utils::Device;
+use crate::io_utils::StickyFile;
+use crate::object::{Object, ObjectHeader};
 
 pub(crate) struct Page {
 	seq: u64,
@@ -46,15 +49,45 @@ impl Page {
 		read.seek_by(28);
 
 		let mut count = 0usize;
-		for obj in 0usize..(self.page_size / 28) {
-			if let Ok(obj) = Object::read_struct(read) {
+		for obj in 0usize..(self.page_size / 24) {
+			if let Ok(obj) = ObjectHeader::read_struct(read) {
 				count += obj.len();
+				read.seek_by(obj.len() as i64);
 			} else {
 				break;
 			}
 		}
 
 		count
+	}
+
+	pub(crate) fn iter<'a, Dev: Device>(&'a self, dev: &'a StickyFile<Dev>) -> PageIter<'a, StickyFile<Dev>> {
+		PageIter {
+			offset: 28,
+			page: self,
+			backing: &dev
+		}
+	}
+}
+
+pub(crate) struct PageIter<'a, Dev: Device> {
+	offset: Offset,
+	page: &'a Page,
+	backing: &'a Dev
+}
+
+impl<'a, Dev: Device> Iterator for PageIter<'a, StickyFile<Dev>> {
+	type Item = Result<ObjectHeader>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		Some(try {
+			let pos = self.backing.position();
+			let header = ObjectHeader::read_struct(&self.backing)?;
+
+			self.offset += (self.backing.position() - pos) as u32 + header.len() as u32;
+
+			header
+		})
 	}
 }
 

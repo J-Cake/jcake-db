@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::sync::Arc;
 use nom::bytes::{tag, take};
 use nom::{IResult, Parser};
@@ -6,8 +7,11 @@ use nom::error::ErrorKind;
 use nom::number::{le_u24, le_u32, u8};
 use nom::sequence::preceded;
 use uuid::Uuid;
+use crate::Result;
+use crate::Error;
 use crate::BinaryRepresentation;
 use crate::crc::check_crc;
+use crate::file::Offset;
 use crate::io_utils::{Device, StickyFile};
 
 #[repr(u8)]
@@ -20,7 +24,7 @@ pub(crate) enum ObjectKind {
 }
 
 impl TryFrom<u8> for ObjectKind {
-	type Error = crate::Error; // or your crate::Error variant
+	type Error = Error; // or your crate::Error variant
 
 	fn try_from(v: u8) -> Result<Self, Self::Error> {
 		Ok(match v {
@@ -28,16 +32,46 @@ impl TryFrom<u8> for ObjectKind {
 			2 => Self::Raw,
 			3 => Self::Tombstone,
 			4 => Self::Reference,
-			other => return Err(crate::Error::new(format!("Invalid object type marker {:#2x}", other))),
+			other => return Err(Error::new(format!("Invalid object type marker {:#2x}", other))),
 		})
 	}
 }
 
 pub struct Object {
-	pub uuid: Uuid,
-	pub length: usize,
-	kind: ObjectKind,
-	data: ObjectData
+	header: ObjectHeader,
+	pub(crate) data: ObjectData
+}
+
+pub(crate) struct ObjectHeader {
+	pub(crate) uuid: Uuid,
+	pub(crate) length: usize,
+	pub(crate) kind: ObjectKind,
+	pub(crate) offset: Offset
+}
+
+impl ObjectHeader {
+	pub(crate) fn len(&self) -> usize {
+		self.length
+	}
+
+	pub(crate) fn into_object(self, dev: &StickyFile<impl Device>) -> Result<Object> {
+		Object::from_header(self, dev)
+	}
+}
+impl Object {
+	pub(crate) fn len(&self) -> usize {
+		self.header.length
+	}
+
+	pub(crate) fn from_header(header: ObjectHeader, dev: &StickyFile<impl Device>) -> Result<Self> {
+		dev.seek_to(header.offset as i64 + 24);
+		let body = dev.read(header.length)?;
+
+		Ok(Self {
+			header,
+			data: ObjectData::Owned(body)
+		})
+	}
 }
 
 pub(crate) enum ObjectData {
@@ -56,8 +90,9 @@ impl std::ops::Deref for Object {
 	}
 }
 
-impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Object {
-	fn read_struct(backend: &StickyFile<Dev>) -> crate::Result<Self> where Self: Sized {
+impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for ObjectHeader {
+	fn read_struct(backend: &StickyFile<Dev>) -> Result<Self> where Self: Sized {
+		let offset = backend.position();
 		let input = backend.read(24)?;
 		let obj = try {
 			let (input, uuid) = map(take(16usize), Uuid::from_slice)
@@ -72,23 +107,40 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Object {
 			(uuid, len as usize, flags, crc)
 		};
 
-		let (uuid, len, flags, crc) = obj.map_err(|err| crate::Error::new(err.to_string()))?;
+		let (uuid, len, flags, crc) = obj.map_err(|err| Error::new(err.to_string()))?;
 
+		// TODO: CRC currently doesn't cover the body.
+		// In order to make the split between header-only and header-plus-payload work, we'd have to simply skip the check for the header and trust that everything's alright.
 		if !check_crc(&input[0..20], crc) {
-			return Err(crate::Error::new(format!("Object {uuid} is corrupt.")));
+			return Err(Error::new(format!("Object {uuid} is corrupt.")));
 		}
 
-		let data = backend.read(len)?;
-
-		Ok(Object {
+		Ok(ObjectHeader {
 			length: len,
 			uuid,
 			kind: flags.try_into()?,
+			offset: offset as u32
+		})
+	}
+
+	fn write_struct(&self, backend: &mut StickyFile<Dev>) -> Result<()> {
+		todo!()
+	}
+}
+
+impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Object {
+	fn read_struct(backend: &StickyFile<Dev>) -> Result<Self> where Self: Sized {
+		let header = ObjectHeader::read_struct(backend)?;
+
+		let data = backend.read(header.length)?;
+
+		Ok(Object {
+			header,
 			data: ObjectData::Owned(data),
 		})
 	}
 
-	fn write_struct(&self, backend: &mut StickyFile<Dev>) -> crate::Result<()> {
+	fn write_struct(&self, backend: &mut StickyFile<Dev>) -> Result<()> {
 		todo!()
 	}
 }

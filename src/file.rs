@@ -15,7 +15,6 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
-use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -30,6 +29,8 @@ pub struct BlockDriver<Backing> {
     version: u32,
     page_size: u32,
     page_offset: u32,
+
+    index: Option<Index>
 }
 
 impl BlockDriver<StickyFile<fs::File>> {
@@ -63,12 +64,18 @@ impl BlockDriver<StickyFile<fs::File>> {
                     version,
                     page_size: block_size,
                     page_offset: block_offset,
+
+                    index: None
                 },
             )
         };
 
         match superblock {
-            Ok((crc, driver)) if check_crc(&input[0..32], crc) => Ok(driver),
+            Ok((crc, mut driver)) if check_crc(&input[0..32], crc) => {
+                driver.index.replace(driver.index()?);
+
+                Ok(driver)
+            },
             Ok(_) => Err(crate::Error::new("Superblock corrupt.")),
             Err(err) => Err(crate::Error::new(err.to_string())),
         }
@@ -89,6 +96,8 @@ impl BlockDriver<StickyFile<fs::File>> {
             version: 0,
             page_size: BlockDriver::PAGE_SIZE as u32,
             page_offset: 0x0001_0000u32,
+
+            index: None
         };
 
         let mut vec = Vec::new();
@@ -113,8 +122,17 @@ impl BlockDriver<StickyFile<fs::File>> {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
 
-    fn index(&self) -> Result<()> {
+impl<BlockDev: Device> BlockDriver<StickyFile<BlockDev>> {
+    fn load_page(&self, page_number: usize) -> Result<Page> {
+        let offset = self.page_offset as i64 * page_number as i64 * self.page_size as i64;
+        self.backing.seek_by(offset);
+
+        Ok(Page::read_struct(&self.backing)?)
+    }
+
+    fn index(&self) -> Result<Index> {
         let mut records = 0usize;
         for page in 0usize.. {
             let page = self.load_page(page)?;
@@ -128,18 +146,21 @@ impl BlockDriver<StickyFile<fs::File>> {
 
         let mut index = Index::with_capacity_and_hasher(records, BuildHasherDefault::new());
 
-        todo!();
+        for page_nr in 0..records {
+            let page = self.load_page(page_nr)?;
 
-        Ok(())
-    }
-}
+            for record in page.iter(&self.backing) {
+                let Ok(record) = record else {
+                    continue;
+                };
 
-impl<BlockDev: Device> BlockDriver<StickyFile<BlockDev>> {
-    fn load_page(&self, page_number: usize) -> Result<Page> {
-        let offset = self.page_offset as i64 * page_number as i64 * self.page_size as i64;
-        self.backing.seek_by(offset);
+                index.entry(record.uuid.as_u128())
+                    .and_modify(|entry| entry.insert(page_nr as PageNr, record.offset))
+                    .or_insert(Location::new(page_nr as PageNr, record.offset));
+            }
+        }
 
-        Ok(Page::read_struct(&self.backing)?)
+        Ok(index)
     }
 }
 
@@ -160,9 +181,22 @@ impl Hasher for FoldHasher {
     }
 }
 
-struct Location {
-    page: usize,
-    offset: usize,
+pub(crate) type PageNr = u64;
+pub(crate) type Offset = u32;
+struct Location(Vec<(PageNr, Offset)>);
+
+impl Location {
+    fn latest(&self) -> (PageNr, Offset) {
+        self.0[0]
+    }
+
+    fn new(page: PageNr, offset: Offset) -> Self {
+        Self(vec![(page, offset)])
+    }
+
+    fn insert(&mut self, page: PageNr, offset: Offset) {
+        self.0.push((page, offset));
+    }
 }
 
 type Index = HashMap<u128, Location, BuildHasherDefault<FoldHasher>>;

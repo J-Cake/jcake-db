@@ -11,7 +11,7 @@ struct Message {
 type Result<T, Error = db::Error> = core::result::Result<T, Error>;
 
 pub fn main() -> Result<()> {
-    let db = TypedDatabase::new("/tmp/fs.db")?;
+    let db = TypedDatabase::new("./fs.db")?;
 
     dbg!(db.search::<Message>(Uuid::new_v4())?);
 
