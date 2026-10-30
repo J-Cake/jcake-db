@@ -1,0 +1,289 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Okteta structure definitions for jcake-db ("fsdb") database files.
+
+  Layout as implemented in src/file.rs, src/page.rs and src/object.rs:
+
+    0x00000000  Superblock (36 bytes), zero padded up to page_offset
+    page_offset + n * page_size
+                Page n: header, then object records, then (once sealed)
+                summary + trailer at the very end of the page
+
+  All integers are little-endian. Every CRC is CRC-32C (Castagnoli, reflected,
+  init and final XOR 0xFFFFFFFF) and is stored as a little-endian u32.
+  Use Okteta's "Validate" action to check magics and CRCs.
+
+  Top-level structures:
+    Superblock                     locked to offset 0; page_offset is followed
+                                   to page 0's header
+    Page header (as written)       32 bytes: what Page::write_struct emits today
+    Page header (as read)          28 bytes: what Page::read_struct expects
+    Object record                  header + payload (JSONB decoded for Structured)
+    Page trailer                   12 bytes "foot" block at the end of a page
+    Page summary entry             one 20 byte entry of the "smry" table
+-->
+<data>
+  <enumDef name="ObjectKind" type="UInt8">
+    <entry name="Structured" value="1" />
+    <entry name="Raw" value="2" />
+    <entry name="Tombstone" value="3" />
+    <entry name="Reference" value="4" />
+  </enumDef>
+
+  <!-- src/file.rs: BlockDriver::blank / BlockDriver::open -->
+  <struct name="Superblock" byteOrder="little-endian" defaultLockOffset="0x0"
+          validationFunc="function() {
+            var b = [];
+            for (var i = 0; i &lt; 4; i++) b.push(this.magic[i].uint8);
+            for (var i = 0; i &lt; 16; i++) b.push(this.uuid[i].uint8);
+            var words = [this.version.uint32, this.page_size.uint32, this.page_offset.uint32];
+            for (var w = 0; w &lt; words.length; w++)
+              for (var i = 0; i &lt; 4; i++) b.push((words[w] &gt;&gt;&gt; (8 * i)) &amp; 0xFF);
+            var c = 0xFFFFFFFF;
+            for (var i = 0; i &lt; b.length; i++) {
+              c ^= b[i];
+              for (var k = 0; k &lt; 8; k++) c = (c &amp; 1) ? ((c &gt;&gt;&gt; 1) ^ 0x82F63B78) : (c &gt;&gt;&gt; 1);
+            }
+            return ((~c) &gt;&gt;&gt; 0) == this.crc.uint32;
+          }">
+    <array name="magic" length="4"
+           validationFunc="function() { return this[0].uint8 == 0x66 &amp;&amp; this[1].uint8 == 0x73 &amp;&amp; this[2].uint8 == 0x64 &amp;&amp; this[3].uint8 == 0x62; }">
+      <primitive type="Char" />
+    </array>
+    <array name="uuid" length="16" typeName="UUID"
+           toStringFunc="function() {
+             var h = '0123456789abcdef', s = '';
+             for (var i = 0; i &lt; 16; i++) {
+               var v = this[i].uint8;
+               s += h.charAt(v &gt;&gt; 4) + h.charAt(v &amp; 15);
+               if (i == 3 || i == 5 || i == 7 || i == 9) s += '-';
+             }
+             return s;
+           }">
+      <primitive type="UInt8" />
+    </array>
+    <primitive name="version" type="UInt32" />
+    <primitive name="page_size" type="UInt32" />
+    <!-- Absolute file offset of page 0; the pointer is followed to its header. -->
+    <pointer name="page_offset" type="UInt32">
+      <target>
+        <struct name="page 0 header (as written)"
+                validationFunc="function() {
+                  var b = [];
+                  for (var i = 0; i &lt; 4; i++) b.push(this.magic[i].uint8);
+                  var words = [this.seq.uint64low32, this.seq.uint64high32,
+                               this.page_size.uint64low32, this.page_size.uint64high32,
+                               this.created.uint64low32, this.created.uint64high32];
+                  for (var w = 0; w &lt; words.length; w++)
+                    for (var i = 0; i &lt; 4; i++) b.push((words[w] &gt;&gt;&gt; (8 * i)) &amp; 0xFF);
+                  var c = 0xFFFFFFFF;
+                  for (var i = 0; i &lt; b.length; i++) {
+                    c ^= b[i];
+                    for (var k = 0; k &lt; 8; k++) c = (c &amp; 1) ? ((c &gt;&gt;&gt; 1) ^ 0x82F63B78) : (c &gt;&gt;&gt; 1);
+                  }
+                  return ((~c) &gt;&gt;&gt; 0) == this.crc.uint32;
+                }">
+          <array name="magic" length="4"
+                 validationFunc="function() { return this[0].uint8 == 0x70 &amp;&amp; this[1].uint8 == 0x61 &amp;&amp; this[2].uint8 == 0x67 &amp;&amp; this[3].uint8 == 0x65; }">
+            <primitive type="Char" />
+          </array>
+          <primitive name="seq" type="UInt64" />
+          <primitive name="page_size" type="UInt64" />
+          <primitive name="created" type="UInt64"
+                     toStringFunc="function() {
+                       var us = this.uint64high32 * 4294967296 + this.uint64low32;
+                       return new Date(us / 1000).toUTCString() + ' (' + us + ' µs)';
+                     }" />
+          <primitive name="crc" type="UInt32" />
+        </struct>
+      </target>
+    </pointer>
+    <primitive name="crc" type="UInt32" />
+  </struct>
+
+  <!--
+    src/page.rs: Page::write_struct. page_size is serialised from a usize, so it
+    takes 8 bytes and the CRC covers the preceding 28 bytes. This is the layout
+    BlockDriver::blank currently puts on disk.
+  -->
+  <struct name="Page header (as written)" byteOrder="little-endian"
+          validationFunc="function() {
+            var b = [];
+            for (var i = 0; i &lt; 4; i++) b.push(this.magic[i].uint8);
+            var words = [this.seq.uint64low32, this.seq.uint64high32,
+                         this.page_size.uint64low32, this.page_size.uint64high32,
+                         this.created.uint64low32, this.created.uint64high32];
+            for (var w = 0; w &lt; words.length; w++)
+              for (var i = 0; i &lt; 4; i++) b.push((words[w] &gt;&gt;&gt; (8 * i)) &amp; 0xFF);
+            var c = 0xFFFFFFFF;
+            for (var i = 0; i &lt; b.length; i++) {
+              c ^= b[i];
+              for (var k = 0; k &lt; 8; k++) c = (c &amp; 1) ? ((c &gt;&gt;&gt; 1) ^ 0x82F63B78) : (c &gt;&gt;&gt; 1);
+            }
+            return ((~c) &gt;&gt;&gt; 0) == this.crc.uint32;
+          }">
+    <array name="magic" length="4"
+           validationFunc="function() { return this[0].uint8 == 0x70 &amp;&amp; this[1].uint8 == 0x61 &amp;&amp; this[2].uint8 == 0x67 &amp;&amp; this[3].uint8 == 0x65; }">
+      <primitive type="Char" />
+    </array>
+    <primitive name="seq" type="UInt64" />
+    <primitive name="page_size" type="UInt64" />
+    <primitive name="created" type="UInt64"
+               toStringFunc="function() {
+                 var us = this.uint64high32 * 4294967296 + this.uint64low32;
+                 return new Date(us / 1000).toUTCString() + ' (' + us + ' µs)';
+               }" />
+    <primitive name="crc" type="UInt32" />
+  </struct>
+
+  <!--
+    src/page.rs: Page::read_struct. 28 bytes with a u32 page_size; the CRC
+    covers the preceding 24 bytes.
+  -->
+  <struct name="Page header (as read)" byteOrder="little-endian"
+          validationFunc="function() {
+            var b = [];
+            for (var i = 0; i &lt; 4; i++) b.push(this.magic[i].uint8);
+            var words = [this.seq.uint64low32, this.seq.uint64high32, this.page_size.uint32,
+                         this.created.uint64low32, this.created.uint64high32];
+            for (var w = 0; w &lt; words.length; w++)
+              for (var i = 0; i &lt; 4; i++) b.push((words[w] &gt;&gt;&gt; (8 * i)) &amp; 0xFF);
+            var c = 0xFFFFFFFF;
+            for (var i = 0; i &lt; b.length; i++) {
+              c ^= b[i];
+              for (var k = 0; k &lt; 8; k++) c = (c &amp; 1) ? ((c &gt;&gt;&gt; 1) ^ 0x82F63B78) : (c &gt;&gt;&gt; 1);
+            }
+            return ((~c) &gt;&gt;&gt; 0) == this.crc.uint32;
+          }">
+    <array name="magic" length="4"
+           validationFunc="function() { return this[0].uint8 == 0x70 &amp;&amp; this[1].uint8 == 0x61 &amp;&amp; this[2].uint8 == 0x67 &amp;&amp; this[3].uint8 == 0x65; }">
+      <primitive type="Char" />
+    </array>
+    <primitive name="seq" type="UInt64" />
+    <primitive name="page_size" type="UInt32" />
+    <primitive name="created" type="UInt64"
+               toStringFunc="function() {
+                 var us = this.uint64high32 * 4294967296 + this.uint64low32;
+                 return new Date(us / 1000).toUTCString() + ' (' + us + ' µs)';
+               }" />
+    <primitive name="crc" type="UInt32" />
+  </struct>
+
+  <!--
+    src/object.rs: ObjectHeader (24 bytes) followed by `length` payload bytes.
+    The header CRC covers the first 20 bytes (uuid, length, kind).
+    Structured payloads are Databend JSONB (big-endian), as produced by
+    jsonb::to_owned_jsonb in TypedDatabase::insert.
+  -->
+  <struct name="Object record" byteOrder="little-endian">
+    <struct name="header"
+            validationFunc="function() {
+              var b = [];
+              for (var i = 0; i &lt; 16; i++) b.push(this.uuid[i].uint8);
+              var len = this.length.value;
+              b.push(len &amp; 0xFF, (len &gt;&gt;&gt; 8) &amp; 0xFF, (len &gt;&gt;&gt; 16) &amp; 0xFF, this.kind.uint8);
+              var c = 0xFFFFFFFF;
+              for (var i = 0; i &lt; b.length; i++) {
+                c ^= b[i];
+                for (var k = 0; k &lt; 8; k++) c = (c &amp; 1) ? ((c &gt;&gt;&gt; 1) ^ 0x82F63B78) : (c &gt;&gt;&gt; 1);
+              }
+              return ((~c) &gt;&gt;&gt; 0) == this.crc.uint32;
+            }">
+      <array name="uuid" length="16" typeName="UUID"
+             toStringFunc="function() {
+               var h = '0123456789abcdef', s = '';
+               for (var i = 0; i &lt; 16; i++) {
+                 var v = this[i].uint8;
+                 s += h.charAt(v &gt;&gt; 4) + h.charAt(v &amp; 15);
+                 if (i == 3 || i == 5 || i == 7 || i == 9) s += '-';
+               }
+               return s;
+             }">
+        <primitive type="UInt8" />
+      </array>
+      <bitfield name="length" type="unsigned" width="24" />
+      <enum name="kind" enum="ObjectKind" type="UInt8"
+            validationFunc="function() { var k = this.uint8; return k &gt;= 1 &amp;&amp; k &lt;= 4; }" />
+      <primitive name="crc" type="UInt32" />
+    </struct>
+    <taggedUnion name="payload">
+      <alternatives>
+        <struct name="jsonb" structName="Structured (JSONB)" byteOrder="big-endian"
+                selectIf="function(root) { return root.header.kind.uint8 == 1; }">
+          <primitive name="container" type="UInt32"
+                     toStringFunc="function() {
+                       var h = this.uint32, t = (h &amp; 0xE0000000) &gt;&gt;&gt; 0, n = h &amp; 0x1FFFFFFF;
+                       var kind = t == 0x80000000 ? 'array' : t == 0x40000000 ? 'object' : t == 0x20000000 ? 'scalar' : 'unknown';
+                       return t == 0x20000000 ? kind : kind + ', ' + n + (t == 0x40000000 ? ' key' + (n == 1 ? '' : 's') : ' element' + (n == 1 ? '' : 's'));
+                     }" />
+          <!-- Objects: key entries then value entries; arrays: one per element; scalars: exactly one. -->
+          <array name="jentries"
+                 length="function() {
+                   var h = this.parent.container.uint32, t = (h &amp; 0xE0000000) &gt;&gt;&gt; 0, n = h &amp; 0x1FFFFFFF;
+                   return t == 0x40000000 ? 2 * n : t == 0x20000000 ? 1 : n;
+                 }">
+            <primitive type="UInt32" />
+          </array>
+          <array name="data"
+                 length="function(root) {
+                   var n = root.header.length.value - 4 - 4 * this.parent.jentries.length;
+                   return n &gt; 0 ? n : 0;
+                 }">
+            <primitive type="UInt8" />
+          </array>
+        </struct>
+      </alternatives>
+      <defaultFields>
+        <array name="data" length="function(root) { return root.header.length.value; }">
+          <primitive type="UInt8" />
+        </array>
+      </defaultFields>
+    </taggedUnion>
+  </struct>
+
+  <!--
+    src/page.rs: PageTrailer. Intended to occupy the last 12 bytes of a sealed
+    page. num_items is the number of entries in the summary that precedes it.
+  -->
+  <struct name="Page trailer" byteOrder="little-endian"
+          validationFunc="function() {
+            var b = [];
+            for (var i = 0; i &lt; 4; i++) b.push(this.magic[i].uint8);
+            var n = this.num_items.uint32;
+            for (var i = 0; i &lt; 4; i++) b.push((n &gt;&gt;&gt; (8 * i)) &amp; 0xFF);
+            var c = 0xFFFFFFFF;
+            for (var i = 0; i &lt; b.length; i++) {
+              c ^= b[i];
+              for (var k = 0; k &lt; 8; k++) c = (c &amp; 1) ? ((c &gt;&gt;&gt; 1) ^ 0x82F63B78) : (c &gt;&gt;&gt; 1);
+            }
+            return ((~c) &gt;&gt;&gt; 0) == this.crc.uint32;
+          }">
+    <array name="magic" length="4"
+           validationFunc="function() { return this[0].uint8 == 0x66 &amp;&amp; this[1].uint8 == 0x6F &amp;&amp; this[2].uint8 == 0x6F &amp;&amp; this[3].uint8 == 0x74; }">
+      <primitive type="Char" />
+    </array>
+    <primitive name="num_items" type="UInt32" />
+    <primitive name="crc" type="UInt32" />
+  </struct>
+
+  <!--
+    src/page.rs: one entry of the summary table. The table is the 4 byte tag
+    "smry" followed by num_items of these, located 20 * num_items + 4 bytes
+    before the trailer (plus a 4 byte CRC in between, as written).
+  -->
+  <struct name="Page summary entry" byteOrder="little-endian">
+    <array name="uuid" length="16" typeName="UUID"
+           toStringFunc="function() {
+             var h = '0123456789abcdef', s = '';
+             for (var i = 0; i &lt; 16; i++) {
+               var v = this[i].uint8;
+               s += h.charAt(v &gt;&gt; 4) + h.charAt(v &amp; 15);
+               if (i == 3 || i == 5 || i == 7 || i == 9) s += '-';
+             }
+             return s;
+           }">
+      <primitive type="UInt8" />
+    </array>
+    <primitive name="offset" type="UInt32" />
+  </struct>
+</data>
