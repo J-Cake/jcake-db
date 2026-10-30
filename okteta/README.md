@@ -5,6 +5,11 @@ Structures tool.
 
 ## Install
 
+Okteta looks for structures in `$XDG_DATA_HOME/okteta/structures`. Where that
+is depends on how Okteta was installed.
+
+### Native package
+
 ```bash
 mkdir -p ~/.local/share/okteta/structures
 ```
@@ -12,6 +17,44 @@ mkdir -p ~/.local/share/okteta/structures
 ```bash
 cp -r okteta/jcake-db ~/.local/share/okteta/structures/
 ```
+
+### Flatpak (`org.kde.okteta`)
+
+Flatpak sets `XDG_DATA_HOME` to `~/.var/app/org.kde.okteta/data`, so the
+sandboxed Okteta never looks in `~/.local/share`. Granting that directory in
+Flatseal doesn't change this: it lets Okteta read the files there, but Okteta
+still doesn't search there.
+
+To install a copy, run from the repository root:
+
+```bash
+mkdir -p ~/.var/app/org.kde.okteta/data/okteta/structures
+```
+
+```bash
+cp -r okteta/jcake-db ~/.var/app/org.kde.okteta/data/okteta/structures/
+```
+
+To make edits to the repository show up without copying again, link to the
+checkout instead and let the sandbox read it. Run from the repository root:
+
+```bash
+flatpak override --user --filesystem="$PWD/okteta:ro" org.kde.okteta
+```
+
+```bash
+ln -sfn "$PWD/okteta/jcake-db" ~/.var/app/org.kde.okteta/data/okteta/structures/jcake-db
+```
+
+The link only resolves inside the sandbox if the checkout's path is exposed,
+which is what the `flatpak override` is for. You can also grant it in Flatseal
+under Filesystem → Other files.
+
+Recent Okteta versions can also install the folder for you: click
+**Install from File(s)…** in the Structures management settings and pick
+`okteta/jcake-db`. It copies the folder into the Flatpak data directory above.
+
+### Enable
 
 Restart Okteta, then go to Tools → Structures → Settings → Structures
 management and tick "jcake-db (fsdb)".
