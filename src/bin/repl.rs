@@ -11,9 +11,16 @@ struct Message {
 type Result<T, Error = db::Error> = core::result::Result<T, Error>;
 
 pub fn main() -> Result<()> {
-    let db = TypedDatabase::new("./fs.db")?;
+    let mut db = TypedDatabase::new("./fs.db")?;
 
-    dbg!(db.search::<Message>(Uuid::new_v4())?);
+    let obj = db.insert(serde_json::json! {{
+        "success": true,
+        "user": {
+            "name": "JCake",
+            "email": "jakieschneider13@gmail.com"
+        }
+    }})?;
+    dbg!(db.search::<Message>(obj)?);
 
     Ok(())
 }

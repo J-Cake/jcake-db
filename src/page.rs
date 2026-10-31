@@ -12,29 +12,40 @@ use uuid::Uuid;
 use crate::Result;
 use crate::Error;
 use crate::BinaryRepresentation;
-use crate::crc::check_crc;
+use crate::crc::{check_crc, Crc};
 use crate::crc::crc;
 use crate::file::Offset;
 use crate::io_utils::Device;
 use crate::io_utils::StickyFile;
-use crate::object::{Object, ObjectHeader};
+use crate::object::{Object, ObjectHeader, ObjectKind};
 
 pub(crate) struct Page {
-	seq: u64,
-	page_offset: u64,
+	pub(crate) seq: u64,
+	pub(crate) page_offset: u64,
 	page_size: usize,
+
+	pub(crate) contents: Option<Vec<ObjectHeader>>,
+
 	trailer: Option<PageTrailer>,
 	created: chrono::DateTime<chrono::Utc>,
 }
 
 impl Page {
-	pub(crate) const PAGE_OFFSET: u64 = 0x1_0000;
+	pub(crate) const FIRST_PAGE_OFFSET: u64 = 0x1_0000;
+	pub(crate) const PAGE_HEADER_SIZE: u64 = 28;
+	pub(crate) const PAGE_FOOTER_SIZE: u64 = 12;
+	pub(crate) const PAGE_SUMMARY_HEADER_SIZE: u64 = 4;
+	pub(crate) const PAGE_SUMMARY_ENTRY_SIZE: u64 = 20;
+	pub(crate) const OBJECT_HEADER_SIZE: u64 = 0;
 
 	pub(crate) fn new(seq: u64, size: usize) -> Page {
 		Self {
 			seq,
-			page_offset: Self::PAGE_OFFSET + seq * size as u64,
+			page_offset: Self::FIRST_PAGE_OFFSET + seq * size as u64,
 			page_size: size,
+
+			contents: None,
+
 			trailer: None,
 			created: chrono::Utc::now()
 		}
@@ -48,9 +59,11 @@ impl Page {
 		if let Some(summary) = self.trailer.as_ref()
 			.and_then(|trailer| trailer.summary.as_ref()) {
 			return summary.len();
+		} else if let Some(ref contents) = self.contents {
+			return contents.len();
 		}
 
-		read.seek_by(28);
+		read.seek_by(Self::PAGE_HEADER_SIZE as i64);
 
 		let mut count = 0usize;
 		for obj in 0usize..(self.page_size / 24) {
@@ -65,12 +78,28 @@ impl Page {
 		count
 	}
 
+	pub(crate) fn preload_record(&mut self, dev: &StickyFile<impl Device>) -> Result<()> {
+		self.contents.replace(self.iter(dev).collect::<Result<_>>()?);
+		Ok(())
+	}
+
 	pub(crate) fn iter<'a, Dev: Device>(&'a self, dev: &'a StickyFile<Dev>) -> PageIter<'a, StickyFile<Dev>> {
 		PageIter {
-			offset: 28,
+			offset: Self::PAGE_HEADER_SIZE as Offset,
 			page: self,
 			backing: &dev
 		}
+	}
+
+	pub(crate) fn next_free(&self, dev: &StickyFile<impl Device>) -> Option<Offset> {
+		if let Some(last) = self.contents.as_ref().and_then(|content| content.last()) {
+			return Some(last.offset + last.length as Offset + Self::PAGE_HEADER_SIZE as Offset);
+		}
+
+		self.iter(dev)
+			.last()
+			.and_then(|i| i.ok())
+			.map(|i| i.offset + i.length as Offset + Self::OBJECT_HEADER_SIZE as Offset)
 	}
 
 	pub(crate) fn get_object_at(&self, offset: Offset, dev: &StickyFile<impl Device>) -> Result<Option<Object>> {
@@ -78,6 +107,23 @@ impl Page {
 		let header = ObjectHeader::read_struct(dev)?;
 
 		Object::from_header(header, dev)
+	}
+
+	pub(crate) fn can_fit_object_of_length(&self, len: usize) -> bool {
+		let Some(c) = self.contents.as_ref() else {
+			// If the `contents` is empty, we can be fairly certain the page is sealed.
+			// Returning `false` on a false negative is fine since we'd rather be safe than writing to an over-full page.
+
+			return false;
+		};
+
+		let offset = c.last()
+			.map(|i| i.offset + i.length as Offset + Self::OBJECT_HEADER_SIZE as Offset)
+			.unwrap_or(Self::PAGE_SUMMARY_HEADER_SIZE as Offset);
+
+		let theoretical_summary_offset = (self.page_size as u64 - Self::PAGE_FOOTER_SIZE - Self::PAGE_SUMMARY_HEADER_SIZE - (c.len() as u64 + 1) * Self::PAGE_SUMMARY_ENTRY_SIZE) as Offset;
+
+		offset + len as Offset + Self::OBJECT_HEADER_SIZE as Offset > theoretical_summary_offset
 	}
 }
 
@@ -105,15 +151,18 @@ impl<'a, Dev: Device> Iterator for PageIter<'a, StickyFile<Dev>> {
 impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
 	fn read_struct(backend: &StickyFile<Dev>) -> Result<Self> where Self: Sized {
 		let page_offset = backend.position() as u64;
-		let input = backend.read(28)?;
+		let input = backend.read(Self::PAGE_HEADER_SIZE as usize)?;
 		let header: IResult<&[u8], (u64, u32, u64, u32)> = preceded(tag(&b"page"[..]), (le_u64(), le_u32(), le_u64(), le_u32()))
 				.parse_complete(&input);
 
 		let mut header = match header {
-			Ok((_, (seq, page_size, created, crc))) if check_crc(&input[0..24], crc) => Self {
+			Ok((_, (seq, page_size, created, crc))) if check_crc(&input[0..(Self::PAGE_HEADER_SIZE as usize - 4)], crc) => Self {
 				seq,
 				page_offset,
 				page_size: page_size as usize,
+
+				contents: None,
+
 				trailer: None,
 				created: chrono::DateTime::from_timestamp_micros(created as i64)
 					.ok_or_else(|| Error::new("Unable to get current time"))?
@@ -122,7 +171,7 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
 			Err(err) => return Err(Error::new(err.to_string()))
 		};
 
-		backend.seek_by(header.page_size as i64 - 16);
+		backend.seek_to((page_offset - Self::PAGE_FOOTER_SIZE) as i64);
 		if let Some(trailer) = PageTrailer::read_struct(backend).ok() {
 			header.trailer.replace(trailer);
 		}
@@ -136,7 +185,7 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
 
 		buf.extend_from_slice(&b"page"[..]);
 		buf.extend_from_slice(&self.seq.to_le_bytes());
-		buf.extend_from_slice(&self.page_size.to_le_bytes());
+		buf.extend_from_slice(&(self.page_size as u32).to_le_bytes());
 		buf.extend_from_slice(&(self.created.timestamp_micros() as u64).to_le_bytes());
 		buf.extend_from_slice(crc(&buf).as_slice());
 
@@ -180,7 +229,7 @@ struct PageTrailer {
 
 impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for PageTrailer {
 	fn read_struct(backend: &StickyFile<Dev>) -> crate::Result<Self> where Self: Sized {
-		let trailer = backend.read(12)?;
+		let trailer = backend.read(Page::PAGE_FOOTER_SIZE as usize)?;
 		let len = match parse_trailer(&trailer) {
 			Ok((_, len)) => len,
 			Err(err) => return Err(crate::Error::new(err.to_string()))

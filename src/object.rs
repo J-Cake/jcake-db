@@ -13,6 +13,7 @@ use crate::BinaryRepresentation;
 use crate::crc::{check_crc, Crc};
 use crate::file::Offset;
 use crate::io_utils::{Device, StickyFile};
+use crate::page::Page;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +48,7 @@ pub(crate) struct ObjectHeader {
 	pub(crate) length: usize,
 	pub(crate) kind: ObjectKind,
 	pub(crate) offset: Offset,
-	crc: u32,
+	pub(crate) crc: u32,
 }
 
 impl ObjectHeader {
@@ -66,13 +67,12 @@ impl Object {
 	}
 
 	pub(crate) fn from_header(header: ObjectHeader, dev: &StickyFile<impl Device>) -> Result<Option<Self>> {
-		dev.seek_to(header.offset as i64 + 24);
 		let data = dev.read(header.length)?;
 
 		let mut crc = Crc::new();
 
 		crc.update(header.uuid.as_bytes());
-		crc.update(header.length.to_le_bytes());
+		crc.update((header.length as u32).to_le_bytes());
 		crc.update(&data);
 
 		if crc.finish() == header.crc.to_le_bytes() {
@@ -105,7 +105,7 @@ impl std::ops::Deref for Object {
 impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for ObjectHeader {
 	fn read_struct(backend: &StickyFile<Dev>) -> Result<Self> where Self: Sized {
 		let offset = backend.position();
-		let input = backend.read(24)?;
+		let input = backend.read(Page::OBJECT_HEADER_SIZE as usize)?;
 		let obj = try {
 			let (input, uuid) = map(take(16usize), Uuid::from_slice)
 				.parse(&input)?;
