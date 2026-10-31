@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Error {
-    msg: String
+    msg: String,
+    recoverable: bool,
 }
 
 impl std::fmt::Display for Error {
@@ -17,8 +18,20 @@ impl std::error::Error for Error {}
 impl Error {
     pub fn new(msg: impl AsRef<str>) -> Self {
         Self {
-            msg: msg.as_ref().to_string()
+            msg: msg.as_ref().to_string(),
+            recoverable: false
         }
+    }
+
+    pub fn recoverable(msg: impl AsRef<str>) -> Self {
+        Self {
+            msg: msg.as_ref().to_string(),
+            recoverable: true
+        }
+    }
+
+    pub(crate) fn is_recoverable(&self) -> bool {
+        self.recoverable
     }
 }
 

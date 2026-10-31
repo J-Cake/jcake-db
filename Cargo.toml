@@ -3,6 +3,9 @@ name = "db"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["format"]
+
 [dependencies]
 jsonb = "0.5.6"
 serde = { version = "1.0.229" }

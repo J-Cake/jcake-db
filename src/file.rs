@@ -74,7 +74,7 @@ impl BlockDriver<StickyFile<fs::File>> {
 
         match superblock {
             Ok((crc, mut driver)) if check_crc(&input[0..32], crc) => {
-                driver.index();
+                BlockDriver::index(&mut driver)?;
                 Ok(driver)
             }
             Ok(_) => Err(crate::Error::new("Superblock corrupt.")),
@@ -142,11 +142,12 @@ impl<BlockDev: Device> BlockDriver<StickyFile<BlockDev>> {
     fn index(&mut self) -> Result<()> {
         let mut records = 0usize;
         for page_nr in 0 as PageNr.. {
-            let page = self.load_page(page_nr)?;
+            let mut page = self.load_page(page_nr)?;
 
             records += page.count_records(&self.backing);
 
             if !page.is_sealed() {
+                page.preload_records(&self.backing)?;
                 self.active_page.replace(page);
                 break;
             }

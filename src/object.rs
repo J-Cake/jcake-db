@@ -121,10 +121,8 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for ObjectHeader {
 
 		let (uuid, len, flags, crc) = obj.map_err(|err| Error::new(err.to_string()))?;
 
-		// TODO: CRC currently doesn't cover the body.
-		// In order to make the split between header-only and header-plus-payload work, we'd have to simply skip the check for the header and trust that everything's alright.
 		if !check_crc(&input[0..20], crc) {
-			return Err(Error::new(format!("Object {uuid} is corrupt.")));
+			return Err(Error::recoverable(format!("Object {uuid} is corrupt.")));
 		}
 
 		Ok(ObjectHeader {
@@ -136,8 +134,15 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for ObjectHeader {
 		})
 	}
 
-	fn write_struct(&self, backend: &mut StickyFile<Dev>) -> Result<()> {
-		todo!()
+	fn write_struct(&self, dev: &mut StickyFile<Dev>) -> Result<()> {
+		let mut vec = vec![];
+
+		vec.extend_from_slice(self.uuid.as_bytes());
+		vec.extend_from_slice(&(self.length as u32).to_le_bytes());
+
+		dev.write(&vec)?;
+
+		Ok(())
 	}
 }
 
@@ -153,7 +158,10 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Object {
 		})
 	}
 
-	fn write_struct(&self, backend: &mut StickyFile<Dev>) -> Result<()> {
-		todo!()
+	fn write_struct(&self, dev: &mut StickyFile<Dev>) -> Result<()> {
+		self.header.write_struct(dev)?;
+		dev.write(&self)?;
+
+		Ok(())
 	}
 }

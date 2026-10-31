@@ -36,7 +36,7 @@ impl Page {
 	pub(crate) const PAGE_FOOTER_SIZE: u64 = 12;
 	pub(crate) const PAGE_SUMMARY_HEADER_SIZE: u64 = 4;
 	pub(crate) const PAGE_SUMMARY_ENTRY_SIZE: u64 = 20;
-	pub(crate) const OBJECT_HEADER_SIZE: u64 = 0;
+	pub(crate) const OBJECT_HEADER_SIZE: u64 = 24;
 
 	pub(crate) fn new(seq: u64, size: usize) -> Page {
 		Self {
@@ -78,7 +78,7 @@ impl Page {
 		count
 	}
 
-	pub(crate) fn preload_record(&mut self, dev: &StickyFile<impl Device>) -> Result<()> {
+	pub(crate) fn preload_records(&mut self, dev: &StickyFile<impl Device>) -> Result<()> {
 		self.contents.replace(self.iter(dev).collect::<Result<_>>()?);
 		Ok(())
 	}
@@ -137,14 +137,15 @@ impl<'a, Dev: Device> Iterator for PageIter<'a, StickyFile<Dev>> {
 	type Item = Result<ObjectHeader>;
 
 	fn next(&mut self) -> Option<Self::Item> {
-		Some(try {
-			let pos = self.backing.position();
-			let header = ObjectHeader::read_struct(&self.backing)?;
-
-			self.offset += (self.backing.position() - pos) as u32 + header.len() as u32;
-
-			header
-		})
+		let pos = self.backing.position();
+		match ObjectHeader::read_struct(&self.backing) {
+			Ok(header) => {
+				self.offset += (self.backing.position() - pos) as u32 + header.len() as u32;
+				Some(Ok(header))
+			}
+			Err(e) if e.is_recoverable() => None,
+			Err(e) => Some(Err(e)),
+		}
 	}
 }
 
@@ -152,7 +153,7 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
 	fn read_struct(backend: &StickyFile<Dev>) -> Result<Self> where Self: Sized {
 		let page_offset = backend.position() as u64;
 		let input = backend.read(Self::PAGE_HEADER_SIZE as usize)?;
-		let header: IResult<&[u8], (u64, u32, u64, u32)> = preceded(tag(&b"page"[..]), (le_u64(), le_u32(), le_u64(), le_u32()))
+		let header: IResult<&[u8], _> = preceded(tag(&b"page"[..]), (le_u64(), le_u32(), le_u64(), le_u32()))
 				.parse_complete(&input);
 
 		let mut header = match header {
@@ -168,7 +169,9 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
 					.ok_or_else(|| Error::new("Unable to get current time"))?
 			},
 			Ok((_, (seq, _, _, _))) => return Err(Error::new(format!("Page {seq} corrupt."))),
-			Err(err) => return Err(Error::new(err.to_string()))
+			Err(err) => {
+				return Err(Error::new(err.to_string()))
+			}
 		};
 
 		backend.seek_to((page_offset - Self::PAGE_FOOTER_SIZE) as i64);
@@ -188,6 +191,8 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
 		buf.extend_from_slice(&(self.page_size as u32).to_le_bytes());
 		buf.extend_from_slice(&(self.created.timestamp_micros() as u64).to_le_bytes());
 		buf.extend_from_slice(crc(&buf).as_slice());
+
+		assert_eq!(buf.len(), Self::PAGE_HEADER_SIZE as usize);
 
 		backend.write(&buf)?;
 
