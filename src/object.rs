@@ -12,7 +12,7 @@ use crate::Error;
 use crate::BinaryRepresentation;
 use crate::crc::{check_crc, Crc};
 use crate::file::Offset;
-use crate::io_utils::{Device, StickyFile};
+use crate::io_utils::{Device, Reader, Writer};
 use crate::page::Page;
 
 #[repr(u8)]
@@ -56,7 +56,7 @@ impl ObjectHeader {
 		self.length
 	}
 
-	pub(crate) fn into_object(self, dev: &StickyFile<impl Device>) -> Result<Object> {
+	pub(crate) fn into_object(self, dev: Reader<impl Device>) -> Result<Object> {
 		Object::from_header(self, dev)?
 			.ok_or(Error::new("Attempted to construct object from invalid header"))
 	}
@@ -66,7 +66,8 @@ impl Object {
 		self.header.length
 	}
 
-	pub(crate) fn from_header(header: ObjectHeader, dev: &StickyFile<impl Device>) -> Result<Option<Self>> {
+	pub(crate) fn from_header(header: ObjectHeader, mut dev: Reader<impl Device>) -> Result<Option<Self>> {
+		dev.seek_to(header.offset as u64 + Page::OBJECT_HEADER_SIZE);
 		let data = dev.read(header.length)?;
 
 		let mut crc = Crc::new();
@@ -102,8 +103,8 @@ impl std::ops::Deref for Object {
 	}
 }
 
-impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for ObjectHeader {
-	fn read_struct(backend: &StickyFile<Dev>) -> Result<Self> where Self: Sized {
+impl<Dev: Device> BinaryRepresentation<Dev> for ObjectHeader {
+	fn read_at_position(mut backend: Reader<Dev>) -> Result<Self> where Self: Sized {
 		let offset = backend.position();
 		let input = backend.read(Page::OBJECT_HEADER_SIZE as usize)?;
 		let obj = try {
@@ -134,21 +135,21 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for ObjectHeader {
 		})
 	}
 
-	fn write_struct(&self, dev: &mut StickyFile<Dev>) -> Result<()> {
+	fn write_struct(&self, dev: &mut Writer<Dev>) -> Result<()> {
 		let mut vec = vec![];
 
 		vec.extend_from_slice(self.uuid.as_bytes());
 		vec.extend_from_slice(&(self.length as u32).to_le_bytes());
 
-		dev.write(&vec)?;
+		dev.append(&vec)?;
 
 		Ok(())
 	}
 }
 
-impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Object {
-	fn read_struct(backend: &StickyFile<Dev>) -> Result<Self> where Self: Sized {
-		let header = ObjectHeader::read_struct(backend)?;
+impl<Dev: Device> BinaryRepresentation<Dev> for Object {
+	fn read_at_position(mut backend: Reader<Dev>) -> Result<Self> where Self: Sized {
+		let header = ObjectHeader::read_at_position(backend.clone())?;
 
 		let data = backend.read(header.length)?;
 
@@ -158,9 +159,9 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Object {
 		})
 	}
 
-	fn write_struct(&self, dev: &mut StickyFile<Dev>) -> Result<()> {
+	fn write_struct(&self, dev: &mut Writer<Dev>) -> Result<()> {
 		self.header.write_struct(dev)?;
-		dev.write(&self)?;
+		dev.append(&self)?;
 
 		Ok(())
 	}

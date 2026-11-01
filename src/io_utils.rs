@@ -1,12 +1,8 @@
 use std::fs::File;
 use std::io;
-use std::io::Cursor;
-use std::ops::Deref;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicI64, Ordering};
-use crate::Result;
+use crate::{Error, Result};
 
-pub(crate) trait Device {
+pub trait Device {
 	fn read_at(&self, offset: u64, len: usize) -> Result<Box<[u8]>>;
 	fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
 	fn sync(&mut self) -> Result<()>;
@@ -114,68 +110,108 @@ mod sys {
 	}
 }
 
-pub(crate) struct StickyFile<Dev: Device>(Dev, AtomicI64);
+/// The only handle that can write. Append-only: `pos` never moves backwards.
+pub(crate) struct Writer<D: Device> {
+	dev: D,
+	pos: u64,
+}
 
-impl<T: Device> StickyFile<T> {
-	pub(crate) fn new(dev: T) -> Self {
-		Self(dev, Default::default())
+impl<D: Device> Writer<D> {
+	/// A new writer with effectively no end
+	pub(crate) fn new(dev: D) -> Self {
+		Self { dev, pos: 0 }
 	}
 
-	pub(crate) fn read(&self, len: usize) -> Result<Box<[u8]>> {
-		self.read_at(self.1.load(Ordering::Relaxed) as u64, len)
+	/// `end` = current end of valid data (0 for a fresh file, or found by scanning).
+	pub(crate) fn with_end(dev: D, end: u64) -> Self {
+		Self { dev, pos: end }
 	}
 
-	pub(crate) fn write(&mut self, data: &[u8]) -> Result<()> {
-		self.write_at(self.1.load(Ordering::Relaxed) as u64, data)
+	/// Appends `data`, returns the offset it was written at.
+	pub(crate) fn append(&mut self, data: &[u8]) -> Result<u64> {
+		let at = self.pos;
+		self.dev.write_at(at, data)?;
+		self.pos += data.len() as u64;
+		Ok(at)
 	}
 
-	pub(crate) fn seek_by(&self, by: i64) {
-		self.1.fetch_add(by, Ordering::Relaxed);
+	pub(crate) fn position(&self) -> u64 {
+		self.pos
 	}
 
-	pub(crate) fn seek_to(&self, to: i64) {
-		self.1.store(to, Ordering::Relaxed);
+	pub(crate) fn advance(&mut self, by: u64) -> &mut Self {
+		self.pos += by;
+		self
 	}
 
-	pub(crate) fn position(&self) -> i64 {
-		self.1.load(Ordering::Relaxed)
+	pub(crate) fn advance_to_alignment(&mut self, interval: u64) -> &mut Self {
+		self.pos = self.pos.next_multiple_of(interval);
+		self
 	}
 
-	pub(crate) fn into_inner(self) -> T {
-		self.0
+	pub(crate) fn try_seek_to(&mut self, offset: u64) -> Result<&mut Self> {
+		if self.pos > offset  {
+			return Err(Error::new("Attempted to move cursor backwards."))
+		}
+
+		self.advance(self.pos - offset);
+		Ok(self)
+	}
+
+	pub(crate) fn sync(&mut self) -> Result<()> {
+		self.dev.sync()
+	}
+
+	/// A reader over everything written so far. Borrows `self`, so no appends while it lives.
+	pub(crate) fn reader(&self) -> Reader<'_, D> {
+		Reader::with_end(&self.dev, self.pos)
+	}
+
+	pub(crate) fn into_inner(self) -> D {
+		self.dev
 	}
 }
 
-/// Deliberately no `DerefMut` because that allows writing without tracking a cursor position.
-/// To write without a cursor, destroy the object and recreate it.
-impl<T: Device> Deref for StickyFile<T> {
-	type Target = T;
+/// Cheap, cloneable, read-only cursor. Never reads past `end`.
+pub(crate) struct Reader<'a, D: Device + ?Sized> {
+	dev: &'a D,
+	pos: u64,
+	end: u64,
+}
 
-	fn deref(&self) -> &Self::Target {
-		&self.0
+impl<D: Device> Clone for Reader<'_, D> {
+	fn clone(&self) -> Self {
+		Self { ..*self }
 	}
 }
 
-impl<Backing: Device> Device for StickyFile<Backing> {
-	fn read_at(&self, offset: u64, len: usize) -> Result<Box<[u8]>> {
-		self.1.store(offset as i64 + len as i64, Ordering::Relaxed);
-		self.0.read_at(offset, len)
+impl<'a, D: Device> Reader<'a, D> {
+
+	/// A new writer with effectively no end
+	pub(crate) fn new(dev: &'a D) -> Self {
+		Self { dev, pos: 0, end: u64::MAX }
 	}
 
-	fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
-		self.1.store(offset as i64 + data.len() as i64, Ordering::Relaxed);
-		self.0.write_at(offset, data)
+	/// Also usable without a writer, e.g. for a read-only open.
+	pub(crate) fn with_end(dev: &'a D, end: u64) -> Self {
+		Self { dev, pos: 0, end }
+	}
+	pub(crate) fn read(&mut self, len: usize) -> Result<Box<[u8]>> {
+		if self.pos + len as u64 > self.end {
+			return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+		}
+		let buf = self.dev.read_at(self.pos, len)?;
+		self.pos += len as u64;
+		Ok(buf)
 	}
 
-	fn sync(&mut self) -> Result<()> {
-		self.0.sync()
+	pub(crate) fn position(&self) -> u64 { self.pos }
+	pub(crate) fn remaining(&self) -> u64 { self.end - self.pos }
+	pub(crate) fn seek_to(&mut self, to: u64) { self.pos = to.min(self.end); }
+	pub(crate) fn seek_by(&mut self, by: i64) { self.seek_to((self.pos as i64 + by) as u64); }
+
+	/// A sub-reader bounded to `[start, start + len)`, e.g. one page.
+	pub(crate) fn slice(&self, start: u64, len: u64) -> Self {
+		Self { dev: self.dev, pos: start, end: (start + len).min(self.end) }
 	}
 }
-
-pub(crate) trait IntoSticky where Self: Device + Sized {
-	fn into_sticky(self) -> StickyFile<Self> {
-		StickyFile::new(self)
-	}
-}
-
-impl<Dev: Device> IntoSticky for Dev {}

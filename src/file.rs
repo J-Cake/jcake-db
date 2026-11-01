@@ -2,8 +2,7 @@ use crate::{BinaryRepresentation, Error};
 use crate::ObjectStore;
 use crate::Result;
 use crate::crc::{check_crc, Crc};
-use crate::io_utils::Device;
-use crate::io_utils::StickyFile;
+use crate::io_utils::{Device, Reader, Writer};
 use crate::object::{Object, ObjectHeader, ObjectKind};
 use crate::page::Page;
 use nom::Parser;
@@ -22,9 +21,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-pub struct BlockDriver<Backing> {
-    path: PathBuf,
-    backing: Backing,
+pub struct BlockDriver<Backing: Device> {
+    // path: PathBuf,
+    backing: Writer<Backing>,
 
     uuid: Uuid,
     version: u32,
@@ -35,15 +34,11 @@ pub struct BlockDriver<Backing> {
     active_page: Option<Page>,
 }
 
-impl BlockDriver<StickyFile<fs::File>> {
+impl<BlockDev: Device> BlockDriver<BlockDev> {
     pub const PAGE_SIZE: usize = 16_777_216;
 
-    pub fn open(path: impl AsRef<Path>) -> crate::Result<Self> {
-        let file = StickyFile::new(
-            OpenOptions::new().read(true).write(true).create(true).open(path.as_ref())?,
-        );
-
-        let input = file.read_at(0, 36)?;
+    fn open(dev: BlockDev) -> Result<Self> {
+        let input = dev.read_at(0, 36)?;
         let superblock = try {
             let (input, uuid) =
                 map(preceded(tag(&b"fsdb"[..]), take(16usize)), Uuid::from_slice).parse(&input)?;
@@ -57,8 +52,7 @@ impl BlockDriver<StickyFile<fs::File>> {
             (
                 crc,
                 BlockDriver {
-                    path: path.as_ref().to_path_buf(),
-                    backing: file,
+                    backing: Writer::new(dev),
 
                     uuid,
                     version,
@@ -82,22 +76,12 @@ impl BlockDriver<StickyFile<fs::File>> {
         }
     }
 
-    pub fn blank(path: impl AsRef<Path>) -> crate::Result<Self> {
-        let file = StickyFile::new(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .truncate(true)
-                .create(true)
-                .open(path.as_ref())?,
-        );
-
+    fn blank(dev: BlockDev) -> Result<Self> {
         let mut driver = BlockDriver {
-            path: path.as_ref().to_owned(),
-            backing: file,
+            backing: Writer::new(dev),
             uuid: Uuid::new_v4(),
             version: 0,
-            page_size: BlockDriver::PAGE_SIZE as u32,
+            page_size: Self::PAGE_SIZE as u32,
             page_offset: Page::FIRST_PAGE_OFFSET as u32,
 
             active_page: None,
@@ -113,30 +97,19 @@ impl BlockDriver<StickyFile<fs::File>> {
         vec.extend_from_slice(&driver.page_offset.to_le_bytes()[..]);
         vec.extend_from_slice(&crate::crc(&vec)[..]);
 
-        vec.resize(BlockDriver::PAGE_SIZE + driver.page_offset as usize, 0u8);
-        let mut vec = StickyFile::new(vec);
-        vec.seek_to(driver.page_offset as i64);
+        driver.backing.append(&vec)?;
+        driver.backing.advance_to_alignment(driver.page_offset as u64);
 
-        let page = Page::new(0, BlockDriver::PAGE_SIZE);
-        page.write_struct(&mut vec)?;
+        let page = Page::new(0, Self::PAGE_SIZE);
+        page.write_struct(&mut driver.backing)?;
         driver.active_page.replace(page);
-
-        driver.backing.write_at(0, &vec)?;
 
         Ok(driver)
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl<BlockDev: Device> BlockDriver<StickyFile<BlockDev>> {
     fn load_page(&self, page_number: PageNr) -> Result<Page> {
-        let offset = self.page_offset as i64 + page_number as i64 * self.page_size as i64;
-        self.backing.seek_to(offset);
-
-        Ok(Page::read_struct(&self.backing)?)
+        // TODO: reuse parsed headers; they're not gonna change
+        Ok(Page::read_struct(self.backing.reader(), self.page_offset as u64 + page_number as u64 * self.page_size as u64)?)
     }
 
     fn index(&mut self) -> Result<()> {
@@ -144,10 +117,10 @@ impl<BlockDev: Device> BlockDriver<StickyFile<BlockDev>> {
         for page_nr in 0 as PageNr.. {
             let mut page = self.load_page(page_nr)?;
 
-            records += page.count_records(&self.backing);
+            records += page.count_records(self.backing.reader());
 
             if !page.is_sealed() {
-                page.preload_records(&self.backing)?;
+                page.preload_records(self.backing.reader())?;
                 self.active_page.replace(page);
                 break;
             }
@@ -158,7 +131,7 @@ impl<BlockDev: Device> BlockDriver<StickyFile<BlockDev>> {
         for page_nr in 0..records as PageNr {
             let page = self.load_page(page_nr)?;
 
-            for record in page.iter(&self.backing) {
+            for record in page.iter(self.backing.reader()) {
                 let Ok(record) = record else {
                     continue;
                 };
@@ -207,6 +180,27 @@ impl<BlockDev: Device> BlockDriver<StickyFile<BlockDev>> {
     }
 }
 
+pub fn open(path: impl AsRef<Path>) -> Result<BlockDriver<fs::File>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path.as_ref())?;
+
+    BlockDriver::open(file)
+}
+
+pub fn blank(path: impl AsRef<Path>) -> Result<BlockDriver<fs::File>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(path.as_ref())?;
+
+    BlockDriver::blank(file)
+}
+
 #[derive(Default)]
 struct FoldHasher(u64);
 
@@ -244,16 +238,14 @@ impl Location {
 
 type Index = HashMap<u128, Location, BuildHasherDefault<FoldHasher>>;
 
-impl<BlockDev: Device> ObjectStore for BlockDriver<StickyFile<BlockDev>> {
+impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
     fn compact_db(&mut self) -> Result<()> {
         todo!()
     }
 
     fn search(&self, id: Uuid) -> Result<Option<Object>> {
         let Some(ref index) = self.index else {
-            return Err(crate::Error::new(
-                "Database is not indexed properly. Please re-open the database",
-            ));
+            return Err(Error::new("Database is not indexed properly. Please re-open the database"));
         };
 
         let Some(location) = index.get(&id.as_u128()) else {
@@ -261,7 +253,7 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<StickyFile<BlockDev>> {
         };
 
         let page = self.load_page(location.latest().0)?;
-        page.get_object_at(location.latest().1 as u32, &self.backing)
+        page.get_object_at(location.latest().1 as u32, self.backing.reader())
     }
 
     fn insert(&mut self, data: &[u8]) -> Result<Uuid> {
@@ -282,7 +274,7 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<StickyFile<BlockDev>> {
 
         // We've called `.active_page_mut()` enough to be reasonably sure that it's set
         let offset = self.active_page.as_ref()
-            .and_then(|page| page.next_free(&self.backing))
+            .and_then(|page| page.next_free(self.backing.reader()))
             .unwrap_or(Page::PAGE_HEADER_SIZE as Offset);
 
         let obj = ObjectHeader {
@@ -293,14 +285,24 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<StickyFile<BlockDev>> {
             offset,
         };
 
-        let seek = self.active_page_mut().page_offset as i64;
-        self.backing.seek_to(seek);
+        let seek = self.active_page_mut().page_offset + offset as u64;
+        self.backing.try_seek_to(seek)?;
         obj.write_struct(&mut self.backing)?;
+        self.backing.append(data)?;
 
         self.active_page_mut()
             .contents
             .get_or_insert(vec![])
             .push(obj);
+
+        self.backing.sync()?;
+
+        let page = self.active_page_mut().seq;
+        if let Err(err) = self.index
+            .get_or_insert_with(|| Default::default())
+            .try_insert(uuid.as_u128(), Location::new(page, offset)) {
+            return Err(Error::new("Object already inserted."));
+        };
 
         Ok(uuid)
     }

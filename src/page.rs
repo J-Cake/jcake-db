@@ -15,8 +15,7 @@ use crate::BinaryRepresentation;
 use crate::crc::{check_crc, Crc};
 use crate::crc::crc;
 use crate::file::Offset;
-use crate::io_utils::Device;
-use crate::io_utils::StickyFile;
+use crate::io_utils::{Device, Reader, Writer};
 use crate::object::{Object, ObjectHeader, ObjectKind};
 
 pub(crate) struct Page {
@@ -55,7 +54,7 @@ impl Page {
 		self.trailer.is_some()
 	}
 
-	pub(crate) fn count_records(&self, read: &StickyFile<impl Device>) -> usize {
+	pub(crate) fn count_records(&self, dev: Reader<impl Device>) -> usize {
 		if let Some(summary) = self.trailer.as_ref()
 			.and_then(|trailer| trailer.summary.as_ref()) {
 			return summary.len();
@@ -63,50 +62,39 @@ impl Page {
 			return contents.len();
 		}
 
-		read.seek_by(Self::PAGE_HEADER_SIZE as i64);
-
-		let mut count = 0usize;
-		for obj in 0usize..(self.page_size / 24) {
-			if let Ok(obj) = ObjectHeader::read_struct(read) {
-				count += obj.len();
-				read.seek_by(obj.len() as i64);
-			} else {
-				break;
-			}
-		}
-
-		count
+		self.iter(dev.clone()).count()
 	}
 
-	pub(crate) fn preload_records(&mut self, dev: &StickyFile<impl Device>) -> Result<()> {
+	pub(crate) fn preload_records(&mut self, dev: Reader<impl Device>) -> Result<()> {
 		self.contents.replace(self.iter(dev).collect::<Result<_>>()?);
 		Ok(())
 	}
 
-	pub(crate) fn iter<'a, Dev: Device>(&'a self, dev: &'a StickyFile<Dev>) -> PageIter<'a, StickyFile<Dev>> {
+	pub(crate) fn iter<'a, Dev: Device>(&'a self, mut dev: Reader<'a, Dev>) -> PageIter<'a, Dev> {
+		dev.seek_to(self.page_offset);
 		PageIter {
 			offset: Self::PAGE_HEADER_SIZE as Offset,
 			page: self,
-			backing: &dev
+			backing: dev
 		}
 	}
 
-	pub(crate) fn next_free(&self, dev: &StickyFile<impl Device>) -> Option<Offset> {
+	pub(crate) fn next_free(&self, dev: Reader<impl Device>) -> Option<Offset> {
 		if let Some(last) = self.contents.as_ref().and_then(|content| content.last()) {
 			return Some(last.offset + last.length as Offset + Self::PAGE_HEADER_SIZE as Offset);
 		}
 
 		self.iter(dev)
-			.last()
-			.and_then(|i| i.ok())
+			.try_fold(None, |_, r| r.map(Some))
+			.ok()?
 			.map(|i| i.offset + i.length as Offset + Self::OBJECT_HEADER_SIZE as Offset)
 	}
 
-	pub(crate) fn get_object_at(&self, offset: Offset, dev: &StickyFile<impl Device>) -> Result<Option<Object>> {
-		dev.seek_to(self.page_offset as i64 + offset as i64);
-		let header = ObjectHeader::read_struct(dev)?;
+	pub(crate) fn get_object_at(&self, offset: Offset, mut dev: Reader<impl Device>) -> Result<Option<Object>> {
+		dev.seek_to(self.page_offset + offset as u64);
+		let header = ObjectHeader::read_at_position(dev.clone())?;
 
-		Object::from_header(header, dev)
+		Object::from_header(header, dev.clone())
 	}
 
 	pub(crate) fn can_fit_object_of_length(&self, len: usize) -> bool {
@@ -130,28 +118,33 @@ impl Page {
 pub(crate) struct PageIter<'a, Dev: Device> {
 	offset: Offset,
 	page: &'a Page,
-	backing: &'a Dev
+	backing: Reader<'a, Dev>
 }
 
-impl<'a, Dev: Device> Iterator for PageIter<'a, StickyFile<Dev>> {
+impl<'a, Dev: Device> Iterator for PageIter<'a, Dev> {
 	type Item = Result<ObjectHeader>;
 
 	fn next(&mut self) -> Option<Self::Item> {
-		let pos = self.backing.position();
-		match ObjectHeader::read_struct(&self.backing) {
+		self.backing.seek_to(self.page.page_offset + self.offset as u64);
+		match ObjectHeader::read_at_position(self.backing.clone()) {
 			Ok(header) => {
-				self.offset += (self.backing.position() - pos) as u32 + header.len() as u32;
+				self.offset += Page::OBJECT_HEADER_SIZE as Offset + header.len() as Offset;
+				if self.offset > self.page.page_size as Offset - Page::PAGE_FOOTER_SIZE as Offset {
+					return None;
+				}
 				Some(Ok(header))
 			}
 			Err(e) if e.is_recoverable() => None,
-			Err(e) => Some(Err(e)),
+			Err(e) => {
+				Some(Err(e))
+			},
 		}
 	}
 }
 
-impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
-	fn read_struct(backend: &StickyFile<Dev>) -> Result<Self> where Self: Sized {
-		let page_offset = backend.position() as u64;
+impl<Dev: Device> BinaryRepresentation<Dev> for Page {
+	fn read_at_position(mut backend: Reader<Dev>) -> Result<Self> where Self: Sized {
+		let page_offset = backend.position();
 		let input = backend.read(Self::PAGE_HEADER_SIZE as usize)?;
 		let header: IResult<&[u8], _> = preceded(tag(&b"page"[..]), (le_u64(), le_u32(), le_u64(), le_u32()))
 				.parse_complete(&input);
@@ -174,16 +167,15 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
 			}
 		};
 
-		backend.seek_to((page_offset - Self::PAGE_FOOTER_SIZE) as i64);
-		if let Some(trailer) = PageTrailer::read_struct(backend).ok() {
+		backend.seek_to(page_offset - Self::PAGE_FOOTER_SIZE);
+		if let Some(trailer) = PageTrailer::read_at_position(backend).ok() {
 			header.trailer.replace(trailer);
 		}
 
 		Ok(header)
 	}
 
-	fn write_struct(&self, backend: &mut StickyFile<Dev>) -> crate::Result<()> {
-		let start = backend.position();
+	fn write_struct(&self, backend: &mut Writer<Dev>) -> Result<()> {
 		let mut buf = vec![];
 
 		buf.extend_from_slice(&b"page"[..]);
@@ -194,81 +186,84 @@ impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for Page {
 
 		assert_eq!(buf.len(), Self::PAGE_HEADER_SIZE as usize);
 
-		backend.write(&buf)?;
+		backend.try_seek_to(self.page_offset)?;
+		backend.append(&buf)?;
 
 		let Some(ref trailer) = self.trailer else {
 			return Ok(());
 		};
 
 		if let Some(ref summary) = trailer.summary && summary.len() != trailer.num_items {
-			return Err(crate::Error::new("Summary length does not match reported object count."));
+			return Err(Error::new("Summary length does not match reported object count."));
 		}
 
-		let travelled = backend.position() - start;
-
-		let mut buf = StickyFile::new(if let Some(ref summary) = trailer.summary {
-			serialise_summary(summary)
-		} else {
-			// TODO: While we're at it, we might as well produce a summary
-			vec![]
-		});
-
-		buf.seek_to(buf.len() as i64 - 1);
-		trailer.write_struct(&mut buf)?;
-
-		let buf = buf.into_inner();
-
-		dbg!(&buf);
-
-		backend.seek_by(self.page_size as i64 - travelled);
-		backend.write(&buf)?;
+		// A properly functioning implementation should never write the header and the footer in the same go.
 
 		Ok(())
 	}
 }
 
 struct PageTrailer {
+	global_offset: u64,
 	summary: Option<HashMap<Uuid, u32>>,
 	num_items: usize
 }
 
-impl<Dev: Device> BinaryRepresentation<StickyFile<Dev>> for PageTrailer {
-	fn read_struct(backend: &StickyFile<Dev>) -> crate::Result<Self> where Self: Sized {
+impl<Dev: Device> BinaryRepresentation<Dev> for PageTrailer {
+	fn read_at_position(mut backend: Reader<Dev>) -> Result<Self> where Self: Sized {
+		let global_offset = backend.position();
 		let trailer = backend.read(Page::PAGE_FOOTER_SIZE as usize)?;
 		let len = match parse_trailer(&trailer) {
 			Ok((_, len)) => len,
-			Err(err) => return Err(crate::Error::new(err.to_string()))
+			Err(err) => return Err(Error::new(err.to_string()))
 		};
 
 		if len <= 0 {
 			return Ok(Self {
+				global_offset,
 				summary: None,
 				num_items: 0
 			});
 		}
 
-		backend.seek_by(0 - (20 * len + 16) as i64);
-		let summary = backend.read(20 * len + 4)?;
-		let summary = match parse_summary(&summary, len) {
+		// Seek to summary
+		let summary_len = Page::PAGE_SUMMARY_HEADER_SIZE - len as u64 * Page::PAGE_SUMMARY_ENTRY_SIZE;
+		backend.seek_by(0 - summary_len as i64);
+
+		let summary = backend.read(summary_len as usize)?;
+		let summary = match parse_summary(&summary, summary_len as usize) {
 			Ok((_, summary)) => summary,
-			Err(err) => return Err(crate::Error::new(err.to_string()))
+			Err(err) => return Err(Error::new(err.to_string()))
 		};
 
 		Ok(Self {
+			global_offset,
 			summary: if summary.is_empty() { None } else { Some(summary) },
 			num_items: len
 		})
 	}
 
 	/// PageTrailer does not serialise the summary.
-	fn write_struct(&self, backend: &mut StickyFile<Dev>) -> crate::Result<()> {
+	fn write_struct(&self, backend: &mut Writer<Dev>) -> Result<()> {
 		let mut buf = vec![];
+
+		if let Some(summary) = self.summary.as_ref() {
+			buf.extend_from_slice(&b"smry"[..]);
+			for (uuid, offset) in summary {
+				buf.extend_from_slice(uuid.as_bytes());
+				buf.extend_from_slice(&offset.to_le_bytes());
+			}
+
+			backend.try_seek_to(self.global_offset - Page::PAGE_SUMMARY_HEADER_SIZE - summary.len() as u64 * Page::PAGE_SUMMARY_ENTRY_SIZE)?;
+		} else {
+			backend.try_seek_to(self.global_offset)?;
+		}
 
 		buf.extend_from_slice(&b"foot"[..]);
 		buf.extend_from_slice(&(self.num_items as u32).to_le_bytes());
 		buf.extend_from_slice(crc(&buf[..]).as_slice());
 
-		backend.write(&buf)?;
+		backend.append(&buf)?;
 
 		Ok(())
 	}
