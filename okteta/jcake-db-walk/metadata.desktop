@@ -1,0 +1,14 @@
+[Desktop Entry]
+Icon=application-x-sqlite3
+Type=Service
+ServiceTypes=KPluginInfo
+
+Name=jcake-db: walk file
+Comment=Whole jcake-db file from the superblock: pages, every object with its JSONB decoded, trailers and summaries. Needs "jcake-db (fsdb)" installed too.
+
+X-KDE-PluginInfo-Author=jcake
+X-KDE-PluginInfo-Email=jakieschneider13@gmail.com
+X-KDE-PluginInfo-Name=jcake-db-walk
+X-KDE-PluginInfo-Version=0.1
+X-KDE-PluginInfo-Category=structure
+X-KDE-PluginInfo-EnabledByDefault=true
