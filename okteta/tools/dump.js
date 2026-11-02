@@ -28,7 +28,7 @@ if (!s) {
 }
 const pluginProblems = ['jcake-db', 'jcake-db-walk'].flatMap(p => emu.checkPlugin(path.join(dir, p)));
 const r = emu.run(s, file, Number(offset !== undefined ? offset : s.lock || 0));
-console.log(r.lines.join('\n'));
+if (r.lines.length) console.log(r.lines.join('\n'));
 const errors = [...pluginProblems, ...new Set(r.errors)];
 console.log(`--- ${r.ok ? 'read' : 'could not read'} structure; ${errors.length} script/engine messages`);
 for (const e of errors) console.log('  ' + e);

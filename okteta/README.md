@@ -79,15 +79,22 @@ management and tick "jcake-db (fsdb)" and "jcake-db: walk file".
 
 ## Use
 
+Structures other than the two locked to offset 0 are read at the cursor. With
+the cursor at the end of the file (where Okteta puts it after opening or
+selecting), they show `<EOF reached>` until you move it.
+
 ### Walking a file
 
 "jcake-db: walk file" is locked to offset 0. Expand `page_offset` to reach
 page 0. Each page shows:
 
 - `header`: the page header.
-- `objects`: the first object. Each object has a `header`, a `payload` and a
-  `next` link to the object after it. For Structured objects, the `payload`
-  row shows the decoded JSON.
+- `objects`: the first object. Each object has:
+  - `header`: the object header.
+  - `data`: a link to the raw payload bytes.
+  - `json`: a link to the payload decoded as JSONB, whose row shows the JSON
+    text. It reads `(not JSONB)` for Raw, Tombstone and Reference objects.
+  - `next`: a link to the object after it.
 - `trailer`: the trailer at the end of the page and, if `num_items` isn't 0,
   a `summary` link to the summary table.
 - `next_page`: the page after this one.
@@ -111,14 +118,16 @@ From "jcake-db (fsdb)":
 - **Superblock** is locked to offset 0. Expand `page_offset` to follow the
   pointer to page 0's header.
 - **Page header**: 28 bytes.
-- **Object record**: put the cursor on an object's UUID. The header layout is
-  detected from the byte after the 24-bit length:
+- **Object record**: put the cursor on an object's UUID. Its `record` row
+  says which layout was detected from the byte after the 24-bit length:
   - non-zero: the 24-byte layout `ObjectHeader::read_at_position` parses
-    (uuid, u24 length, kind, CRC).
+    (uuid, u24 length, kind, CRC), followed by the payload.
   - zero: the 20-byte layout `ObjectHeader::write_struct` currently writes
-    (uuid, u32 length). This is flagged as invalid.
+    (uuid, u32 length), followed by the payload. This is flagged as invalid.
 
-  Structured payloads are decoded from Databend JSONB.
+  Structured payloads appear as a `jsonb` row showing the decoded JSON; other
+  kinds as raw `data`. If a corrupt length runs past the end of the file, the
+  whole record can't be read; the walker still shows such an object's header.
 - **Page trailer**: the 12-byte `foot` block. Its CRC also covers the summary,
   so it's only checked here when `num_items` is 0.
 - **Page summary entry**: one 20-byte `(uuid, offset)` record in the `smry`
@@ -153,5 +162,7 @@ node okteta/tools/dump.js fs.db 'Object record' 0x1001c
 
 The first command walks the whole file. The second applies one structure from
 `main.osd` at the given offset. Lines after `---` are script errors, which
-Okteta would put in its structures log. The exit status is non-zero if there
-were any, so you can use it to check edits to the definitions.
+Okteta would put in its structures log. They also include `FATAL` problems in
+the definitions themselves: Okteta drops such a structure without showing it
+or saying why. The exit status is non-zero if there were any messages, so you
+can use it to check edits to the definitions.

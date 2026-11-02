@@ -41,14 +41,15 @@ function timestamp() {
 
 // A pointer that takes no space of its own (it overlays one byte of a union)
 // and whose target address is `address(pointer, root)`. The row shows the
-// target address, or `describe(target)` once the target has been read.
-function link(target, address, describe) {
+// target address, or `describe(target)` once the target has been read, or
+// `none` (default "(end)") when there is no target.
+function link(target, address, describe, none) {
     var p = pointer(uint8(), target, 1, function(root) { return address(this, root); });
     p.typeName = 'link';
     p.toStringFunc = function(root) {
         var a = address(this, root);
         if (a == lib.NOWHERE) {
-            return '(end)';
+            return none || '(end)';
         }
         var s = '-> 0x' + a.toString(16);
         return describe && this.target.wasAbleToRead ? s + ': ' + describe(this.target) : s;
@@ -110,14 +111,24 @@ function nextObject(ptr, root) {
     return next + lib.OBJECT_HEADER_SIZE_WRITTEN > limit ? lib.NOWHERE : next;
 }
 
-// The payload sits behind its own pointer so that a corrupt length (running
-// past the end of the file) only makes the payload unreadable, not the header.
+// The payload sits behind pointers so that a corrupt length (running past
+// the end of the file) only makes the payload unreadable, not the header.
 function payload(ptr, root) {
     var obj = ptr.parent, h = obj.header;
     if (lib.isFreeSpace(h)) {
         return lib.NOWHERE;
     }
     return objectAddress(obj, root) + lib.objectHeaderSize(h);
+}
+
+// Structured objects, and write_struct-layout ones (insert only stores Structured)
+function isJsonb(obj) {
+    var k = obj.header.kind.value;
+    return (k == 0 || k == 1) && !lib.isFreeSpace(obj.header);
+}
+
+function jsonPayload(ptr, root) {
+    return isJsonb(ptr.parent) ? payload(ptr, root) : lib.NOWHERE;
 }
 
 function nextPage(ptr, root) {
@@ -163,7 +174,15 @@ function objectHeader() {
     return h;
 }
 
-function objectPayload() {
+// Okteta needs a tagged union to have fixed children to select on, and a
+// payload has none, so instead of choosing between JSONB and raw bytes each
+// object links to both: `data` always, `json` only when the payload is JSONB.
+function rawPayload() {
+    // data -> link -> object
+    return array(uint8(), function() { return this.parent.parent.header.length.value; });
+}
+
+function jsonbPayload() {
     var container = uint32();
     container.toStringFunc = function() { return lib.describeContainer(this.value); };
     var jsonb = struct({
@@ -172,38 +191,21 @@ function objectPayload() {
             return lib.jsonbEntryCount(this.parent.container.value);
         }),
         data: array(uint8(), function() {
-            var obj = this.parent.parent.parent.parent; // jsonb, payload, link, object
+            var obj = this.parent.parent.parent; // jsonb, link, object
             var n = obj.header.length.value - 4 - 4 * this.parent.jentries.length;
             return n > 0 ? n : 0;
         })
     });
     jsonb.byteOrder = 'bigEndian';
     jsonb.toStringFunc = function() { return lib.jsonbStructToJson(this); };
-
-    return taggedUnion(
-        {},
-        [
-            alternative(function() {
-                            var k = this.parent.parent.header.kind.value; // link, object
-                            return k == 0 || k == 1;
-                        },
-                        { jsonb: jsonb },
-                        'Structured (JSONB)')
-        ],
-        {
-            data: array(uint8(), function() { return this.parent.parent.parent.header.length.value; })
-        });
-}
-
-function describePayload(p) {
-    var k = p.parent.parent.header.kind.value; // link, object
-    return k == 0 || k == 1 ? lib.jsonbStructToJson(p.jsonb) : p.data.length + ' raw bytes';
+    return jsonb;
 }
 
 function objectNode(index) {
     var fields = {
         header: objectHeader(),
-        payload: link(objectPayload(), payload, describePayload)
+        data: link(rawPayload(), payload, function(d) { return d.length + ' bytes'; }, '(none)'),
+        json: link(jsonbPayload(), jsonPayload, lib.jsonbStructToJson, '(not JSONB)')
     };
     if (index + 1 < MAX_OBJECTS_PER_PAGE) {
         fields.next = link(objectNode(index + 1), nextObject);

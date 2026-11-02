@@ -342,10 +342,55 @@ function loadOsd(file, structuresDir) {
     }
     throw new Error('unsupported OSD element ' + e.tag);
   };
-  return tree.children.filter(e => e.tag !== 'enumDef').map(e => ({ name: e.attrs.name, desc: conv(e), lock: e.attrs.defaultLockOffset }));
+  const listable = ['struct', 'array', 'bitfield', 'primitive', 'union', 'enum', 'flags', 'string'];
+  return tree.children.filter(e => e.tag !== 'enumDef').map(e => ({ name: e.attrs.name, desc: conv(e), lock: e.attrs.defaultLockOffset, tag: e.tag, listable: listable.includes(e.tag) }));
+}
+
+// The checks DataInformationFactory makes while building a structure. Okteta
+// drops a structure that fails any of them without showing it, so they're
+// fatal here.
+function checkDesc(desc, where, problems) {
+  const sub = (d, name) => checkDesc(d, `${where}.${name}`, problems);
+  const fields = obj => Object.keys(obj || {}).forEach(k => sub(obj[k], k));
+  if (!desc || typeof desc !== 'object' || !desc.kind) { problems.push(`${where}: not a structure element`); return problems; }
+  for (const f of ['validationFunc', 'toStringFunc', 'updateFunc'])
+    if (desc[f] !== undefined && typeof desc[f] !== 'function') problems.push(`${where}: ${f} is not a function`);
+  switch (desc.kind) {
+    case 'prim':
+      if (desc.type === 'bitfield' && !(desc.width >= 1 && desc.width <= 64)) problems.push(`${where}: bitfield width must be 1-64`);
+      else if (desc.type !== 'bitfield' && !PRIM_SIZES[desc.type]) problems.push(`${where}: unrecognized primitive type ${desc.type}`);
+      break;
+    case 'enum':
+      if (!desc.values || !Object.keys(desc.values).length) problems.push(`${where}: no enum values`);
+      break;
+    case 'array':
+      if (desc.length === undefined || desc.length === '') problems.push(`${where}: no array length`);
+      sub(desc.type, '<array type>');
+      break;
+    case 'struct': case 'union': fields(desc.fields); break;
+    case 'pointer':
+      if (!['uint8', 'uint16', 'uint32', 'uint64'].includes(desc.type && desc.type.type)) problems.push(`${where}: pointer type must be an unsigned integer`);
+      if (desc.interpretFunc !== undefined && typeof desc.interpretFunc !== 'function') problems.push(`${where}: interpretFunc is not a function`);
+      sub(desc.target, '<pointer target>');
+      break;
+    case 'tagged':
+      if (!Object.keys(desc.fields || {}).length) problems.push(`${where}: no children in tagged union; at least one is required so that tag can be evaluated`);
+      if (!Array.isArray(desc.alternatives) || !desc.alternatives.length) problems.push(`${where}: tagged union needs at least one alternative`);
+      fields(desc.fields); fields(desc.defaults);
+      (desc.alternatives || []).forEach((alt, i) => {
+        if (typeof alt.selectIf !== 'function' && !/^\d+$/.test(String(alt.selectIf))) problems.push(`${where}: alternative ${i} selectIf is neither function nor number`);
+        Object.keys(alt.fields || {}).forEach(k => sub(alt.fields[k], `<alternative ${i}>.${k}`));
+      });
+      break;
+  }
+  return problems;
 }
 
 function run(structure, file, addr, opts) {
+  const problems = checkDesc(structure.desc, structure.name, []);
+  if (structure.listable === false) problems.push(`${structure.name}: <${structure.tag}> can't be a top-level element; Okteta only lists struct, array, bitfield, primitive, union, enum, flags and string`);
+  if (problems.length) return { top: null, ok: false, lines: [], errors: problems.map(p => 'FATAL (Okteta would drop this structure): ' + p) };
+
   input = fs.readFileSync(file);
   errors.length = 0;
   const top = new Node(structure.desc, structure.name, undefined);

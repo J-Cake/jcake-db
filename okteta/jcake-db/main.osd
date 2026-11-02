@@ -80,19 +80,23 @@
     src/object.rs: one object record, i.e. a header followed by `length`
     payload bytes. Put the cursor on the object's UUID.
 
-    The header comes in two shapes, told apart by the byte after the 24-bit
-    length (a valid kind is never 0, a u32 length below 16 MiB always has a
-    zero top byte):
+    uuid, length and kind are read first; what follows depends on kind. The
+    header comes in two shapes, told apart by the byte after the 24-bit
+    length (a valid kind is never 0, and a u32 length below 16 MiB always has
+    a zero top byte):
       kind != 0  24 bytes as read_at_position parses them: uuid, u24 length,
-                 kind, CRC over bytes 0..20
+                 kind, CRC over bytes 0..20, then the payload
       kind == 0  20 bytes as write_struct currently emits them: uuid, u32
-                 length; no kind, no CRC
-    Structured payloads (and write_struct-layout payloads, since insert only
-    stores Structured objects) are decoded as Databend JSONB: the payload row
-    shows the JSON text, expanding it shows container header, JEntries and data.
+                 length, then the payload; no kind, no CRC. insert only stores
+                 Structured objects, so the payload is decoded as JSONB.
+    Structured payloads are Databend JSONB: the jsonb row shows the JSON
+    text, expanding it shows container header, JEntries and data.
+
+    (Okteta requires a tagged union to have fixed children to select on, so
+    the header fields and the payload share one tagged union.)
   -->
   <struct name="Object record" byteOrder="little-endian">
-    <taggedUnion name="header"
+    <taggedUnion name="record"
                  validationFunc="function() { return importScript('jcake-db/common.js').validateObjectHeader(this); }">
       <array name="uuid" length="16" typeName="UUID"
              toStringFunc="function() { return importScript('jcake-db/common.js').uuidToString(this); }">
@@ -101,39 +105,56 @@
       <bitfield name="length" type="unsigned" width="24" />
       <enum name="kind" enum="ObjectKind" type="UInt8" />
       <alternatives>
-        <primitive name="crc" type="UInt32" structName="24 byte header (read_at_position)"
-                   selectIf="function() { return this.kind.value != 0; }" />
-      </alternatives>
-      <defaultFields />
-    </taggedUnion>
-    <taggedUnion name="payload">
-      <alternatives>
-        <struct name="jsonb" structName="Structured (JSONB)" byteOrder="big-endian"
-                selectIf="function(root) {
-                  var k = root.header.kind.value;
-                  return (k == 0 || k == 1) &amp;&amp; !importScript('jcake-db/common.js').isFreeSpace(root.header);
-                }"
-                toStringFunc="function() { return importScript('jcake-db/common.js').jsonbStructToJson(this); }">
-          <primitive name="container" type="UInt32"
-                     toStringFunc="function() { return importScript('jcake-db/common.js').describeContainer(this.value); }" />
-          <array name="jentries"
-                 length="function() { return importScript('jcake-db/common.js').jsonbEntryCount(this.parent.container.value); }">
-            <primitive type="UInt32" />
-          </array>
-          <array name="data"
-                 length="function(root) {
-                   var n = root.header.length.value - 4 - 4 * this.parent.jentries.length;
-                   return n &gt; 0 ? n : 0;
-                 }">
+        <group structName="Structured, 24 byte header"
+               selectIf="function() { return this.kind.value == 1; }">
+          <primitive name="crc" type="UInt32" />
+          <struct name="jsonb" byteOrder="big-endian"
+                  toStringFunc="function() { return importScript('jcake-db/common.js').jsonbStructToJson(this); }">
+            <primitive name="container" type="UInt32"
+                       toStringFunc="function() { return importScript('jcake-db/common.js').describeContainer(this.value); }" />
+            <array name="jentries"
+                   length="function() { return importScript('jcake-db/common.js').jsonbEntryCount(this.parent.container.value); }">
+              <primitive type="UInt32" />
+            </array>
+            <array name="data"
+                   length="function() {
+                     var n = this.parent.parent.length.value - 4 - 4 * this.parent.jentries.length;
+                     return n &gt; 0 ? n : 0;
+                   }">
+              <primitive type="UInt8" />
+            </array>
+          </struct>
+        </group>
+        <group structName="20 byte write_struct header, assumed Structured"
+               selectIf="function() {
+                 return this.kind.value == 0 &amp;&amp; !importScript('jcake-db/common.js').isFreeSpace(this);
+               }">
+          <struct name="jsonb" byteOrder="big-endian"
+                  toStringFunc="function() { return importScript('jcake-db/common.js').jsonbStructToJson(this); }">
+            <primitive name="container" type="UInt32"
+                       toStringFunc="function() { return importScript('jcake-db/common.js').describeContainer(this.value); }" />
+            <array name="jentries"
+                   length="function() { return importScript('jcake-db/common.js').jsonbEntryCount(this.parent.container.value); }">
+              <primitive type="UInt32" />
+            </array>
+            <array name="data"
+                   length="function() {
+                     var n = this.parent.parent.length.value - 4 - 4 * this.parent.jentries.length;
+                     return n &gt; 0 ? n : 0;
+                   }">
+              <primitive type="UInt8" />
+            </array>
+          </struct>
+        </group>
+        <group structName="Raw, Tombstone or Reference, 24 byte header"
+               selectIf="function() { var k = this.kind.value; return k &gt;= 2 &amp;&amp; k &lt;= 4; }">
+          <primitive name="crc" type="UInt32" />
+          <array name="data" length="function() { return this.parent.length.value; }">
             <primitive type="UInt8" />
           </array>
-        </struct>
+        </group>
       </alternatives>
-      <defaultFields>
-        <array name="data" length="function(root) { return root.header.length.value; }">
-          <primitive type="UInt8" />
-        </array>
-      </defaultFields>
+      <defaultFields />
     </taggedUnion>
   </struct>
 
