@@ -277,7 +277,7 @@ function loadJs(file, structuresDir) {
   const ctx = makeContext(structuresDir);
   vm.runInContext(fs.readFileSync(file, 'utf8'), ctx, { filename: file });
   const desc = ctx.init();
-  return [{ name: desc.name || path.basename(path.dirname(file)), desc, lock: desc.defaultLockOffset }];
+  return [{ name: path.basename(path.dirname(file)), desc, lock: desc.defaultLockOffset }];
 }
 
 // Just enough XML for .osd files: elements, attributes, comments, the five
@@ -354,4 +354,26 @@ function run(structure, file, addr, opts) {
   return { top, ok: r >= 0, lines: dump(top, 0, [], opts), errors: errors.slice() };
 }
 
-module.exports = { loadJs, loadOsd, run, Node };
+// Checks what Okteta's plugin loading would trip over before any structure
+// is read (StructureDefinitionFile, ScriptFileParser::parseStructureNames).
+function checkPlugin(pluginDir) {
+  const problems = [], id = path.basename(pluginDir);
+  const meta = fs.readFileSync(path.join(pluginDir, 'metadata.desktop'), 'utf8');
+  const field = k => (meta.match(new RegExp('^' + k + '=(.*)$', 'm')) || [])[1];
+  const category = field('X-KDE-PluginInfo-Category');
+  const hasJs = fs.existsSync(path.join(pluginDir, 'main.js'));
+  const hasOsd = fs.existsSync(path.join(pluginDir, 'main.osd'));
+  if (field('X-KDE-PluginInfo-Name') !== id)
+    problems.push(`X-KDE-PluginInfo-Name should be the directory name "${id}"`);
+  if (category === 'structure/js' && !hasJs) problems.push('category structure/js needs a main.js');
+  if (category === 'structure' && !hasOsd) problems.push('category structure needs a main.osd (main.js is ignored)');
+  if (category !== 'structure' && category !== 'structure/js') problems.push(`unknown category "${category}"`);
+  if (category === 'structure/js' && hasJs) {
+    const [s] = loadJs(path.join(pluginDir, 'main.js'), path.dirname(pluginDir));
+    if (s.desc.name !== undefined && s.desc.name !== id)
+      problems.push(`init() renames the structure to "${s.desc.name}"; Okteta looks it up as "${id}"`);
+  }
+  return problems.map(p => `${id}/metadata.desktop: ${p}`);
+}
+
+module.exports = { loadJs, loadOsd, run, checkPlugin, Node };

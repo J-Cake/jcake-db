@@ -271,7 +271,8 @@ function init() {
         page_offset: pointer(uint32(), pageNode(0)),
         crc: uint32()
     });
-    sb.name = 'jcake-db';
+    // No name override: Okteta lists a JS structure under its plugin id
+    // (jcake-db-walk) and finds it by that name when it's enabled.
     sb.byteOrder = 'littleEndian';
     sb.defaultLockOffset = 0;
     sb.validationFunc = function() { return lib.validateSuperblock(this); };
