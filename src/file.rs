@@ -136,6 +136,10 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
                     continue;
                 };
 
+                if record.kind == ObjectKind::Tombstone {
+                    continue;
+                }
+
                 index
                     .entry(record.uuid.as_u128())
                     .and_modify(|entry| entry.insert(page_nr as PageNr, record.offset))
@@ -243,6 +247,8 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         todo!()
     }
 
+    fn entries(&self) -> ObjectIterator<'_, Self> { ObjectIterator(self) }
+
     fn search(&self, id: Uuid) -> Result<Option<Object>> {
         let Some(ref index) = self.index else {
             return Err(Error::new("Database is not indexed properly. Please re-open the database"));
@@ -312,6 +318,16 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
     }
 
     fn delete(&mut self, id: Uuid) -> Result<()> {
+        todo!()
+    }
+}
+
+pub struct ObjectIterator<'a, Store: ObjectStore>(&'a Store);
+
+impl<'store, Store: ObjectStore> Iterator for ObjectIterator<'store, Store> {
+    type Item = Object;
+
+    fn next(&mut self) -> Option<Self::Item> {
         todo!()
     }
 }

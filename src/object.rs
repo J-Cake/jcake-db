@@ -138,8 +138,12 @@ impl<Dev: Device> BinaryRepresentation<Dev> for ObjectHeader {
 	fn write_struct(&self, dev: &mut Writer<Dev>) -> Result<()> {
 		let mut vec = vec![];
 
+		assert!(self.length <= 0xFF_FFFF);
+
 		vec.extend_from_slice(self.uuid.as_bytes());
-		vec.extend_from_slice(&(self.length as u32).to_le_bytes());
+		vec.extend_from_slice(&(self.length as u32).to_le_bytes()[..3]);
+		vec.extend_from_slice(&[self.kind as u8]);
+		vec.extend_from_slice(&self.crc.to_le_bytes());
 
 		dev.append(&vec)?;
 

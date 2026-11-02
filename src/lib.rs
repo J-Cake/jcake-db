@@ -23,8 +23,9 @@ use crate::object::Object;
 
 pub(crate) type Result<T, Error = crate::Error> = std::result::Result<T, Error>;
 
-pub trait ObjectStore {
+pub trait ObjectStore: Sized {
     fn compact_db(&mut self) -> Result<()>;
+    fn entries(&self) -> impl Iterator<Item=Object>;
 
     fn search(&self, id: Uuid) -> Result<Option<Object>>;
     fn insert(&mut self, data: &[u8]) -> Result<Uuid>;
