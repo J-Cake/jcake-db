@@ -62,7 +62,8 @@ impl Page {
 			return contents.len();
 		}
 
-		self.iter(dev.clone()).count()
+		self.iter(dev.clone())
+			.count()
 	}
 
 	pub(crate) fn preload_records(&mut self, dev: Reader<impl Device>) -> Result<()> {
@@ -75,7 +76,8 @@ impl Page {
 		PageIter {
 			offset: Self::PAGE_HEADER_SIZE as Offset,
 			page: self,
-			backing: dev
+			backing: dev,
+			did_return_error: false
 		}
 	}
 
@@ -118,13 +120,18 @@ impl Page {
 pub(crate) struct PageIter<'a, Dev: Device> {
 	offset: Offset,
 	page: &'a Page,
-	backing: Reader<'a, Dev>
+	backing: Reader<'a, Dev>,
+	did_return_error: bool
 }
 
 impl<'a, Dev: Device> Iterator for PageIter<'a, Dev> {
 	type Item = Result<ObjectHeader>;
 
 	fn next(&mut self) -> Option<Self::Item> {
+		if self.did_return_error {
+			return None;
+		}
+
 		self.backing.seek_to(self.page.page_offset + self.offset as u64);
 		match ObjectHeader::read_at_position(self.backing.clone()) {
 			Ok(header) => {
@@ -136,6 +143,7 @@ impl<'a, Dev: Device> Iterator for PageIter<'a, Dev> {
 			}
 			Err(e) if e.is_recoverable() => None,
 			Err(e) => {
+				self.did_return_error = true;
 				Some(Err(e))
 			},
 		}

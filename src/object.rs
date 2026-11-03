@@ -122,9 +122,7 @@ impl<Dev: Device> BinaryRepresentation<Dev> for ObjectHeader {
 
 		let (uuid, len, flags, crc) = obj.map_err(|err| Error::new(err.to_string()))?;
 
-		if !check_crc(&input[0..20], crc) {
-			return Err(Error::recoverable(format!("Object {uuid} is corrupt.")));
-		}
+		// We can't check the CRC here, because it depends on the data.
 
 		Ok(ObjectHeader {
 			length: len,

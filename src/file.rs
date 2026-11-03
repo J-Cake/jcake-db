@@ -1,4 +1,4 @@
-use crate::{BinaryRepresentation, Error};
+use crate::{object, BinaryRepresentation, Error};
 use crate::ObjectStore;
 use crate::Result;
 use crate::crc::{check_crc, Crc};
@@ -247,7 +247,7 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         todo!()
     }
 
-    fn entries(&self) -> ObjectIterator<'_, Self> { ObjectIterator(self) }
+    fn entries(&self) -> impl Iterator<Item = Object> { ObjectIterator(self) }
 
     fn search(&self, id: Uuid) -> Result<Option<Object>> {
         let Some(ref index) = self.index else {

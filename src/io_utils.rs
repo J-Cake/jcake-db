@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io;
+use std::io::ErrorKind;
 use crate::{Error, Result};
 
 pub trait Device {
@@ -25,7 +26,10 @@ impl<Dev: Device + ?Sized> Device for &mut Dev {
 impl Device for File {
 	fn read_at(&self, offset: u64, len: usize) -> Result<Box<[u8]>> {
 		let mut buf = vec![0u8; len].into_boxed_slice();
-		sys::read_exact_at(self, &mut buf, offset)?;
+		if let Err(err) = sys::read_exact_at(self, &mut buf, offset) && err.kind() == ErrorKind::UnexpectedEof {
+			return Err(Error::recoverable("EOF"));
+		};
+
 		Ok(buf)
 	}
 
@@ -46,7 +50,7 @@ impl Device for Vec<u8> {
 		let src = usize::try_from(offset)
 			.ok()
 			.and_then(|s| self.get(s..s.checked_add(len)?))
-			.ok_or(io::Error::from(io::ErrorKind::UnexpectedEof))?;
+			.ok_or(Error::recoverable("EOF"))?;
 
 		Ok(src.to_vec().into_boxed_slice())
 	}
@@ -154,7 +158,7 @@ impl<D: Device> Writer<D> {
 			return Err(Error::new("Attempted to move cursor backwards."))
 		}
 
-		self.advance(self.pos - offset);
+		self.advance(offset - self.pos);
 		Ok(self)
 	}
 
@@ -164,7 +168,7 @@ impl<D: Device> Writer<D> {
 
 	/// A reader over everything written so far. Borrows `self`, so no appends while it lives.
 	pub(crate) fn reader(&self) -> Reader<'_, D> {
-		Reader::with_end(&self.dev, self.pos)
+		Reader::new(&self.dev)
 	}
 
 	pub(crate) fn into_inner(self) -> D {
@@ -198,8 +202,9 @@ impl<'a, D: Device> Reader<'a, D> {
 	}
 	pub(crate) fn read(&mut self, len: usize) -> Result<Box<[u8]>> {
 		if self.pos + len as u64 > self.end {
-			return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+			return Err(Error::recoverable("EOF"));
 		}
+
 		let buf = self.dev.read_at(self.pos, len)?;
 		self.pos += len as u64;
 		Ok(buf)
