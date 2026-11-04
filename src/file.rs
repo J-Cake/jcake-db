@@ -264,7 +264,7 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         let page_offset = self.active_page.as_ref()
             .and_then(|page| page.next_free(self.backing.reader()))
             .unwrap_or(PageHeader::SIZE as Offset)
-            .next_multiple_of(0x10);
+            .next_multiple_of(Page::ALIGNMENT as u32);
 
         let seek = self.active_page_mut().page_start + page_offset as u64;
 
