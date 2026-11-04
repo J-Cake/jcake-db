@@ -2,12 +2,15 @@
 <!--
   Okteta structure definitions for jcake-db ("fsdb") database files.
 
-  Layout as implemented in src/file.rs, src/page.rs and src/object.rs:
+  Layout as implemented in src/file.rs, src/page.rs and src/object.rs (the
+  #[binary(...)] attributes there give each structure's fields in order):
 
     0x00000000  Superblock (36 bytes), then nothing until page_offset
     page_offset + n * page_size
-                Page n: 28 byte header, then object records back to back,
-                then (once sealed) summary + trailer at the end of the page
+                Page n: 28 byte header, then object records, each starting
+                on a 16 byte boundary relative to the page (the first at
+                +0x20), zero padded in between, then (once sealed) summary +
+                trailer at the end of the page
 
   All integers are little-endian except inside JSONB payloads. Every CRC is
   CRC-32C stored as a little-endian u32. Use Okteta's "Validate" action to
@@ -22,7 +25,7 @@
 -->
 <data>
   <enumDef name="ObjectKind" type="UInt8">
-    <entry name="none (20 byte write_struct header)" value="0" />
+    <entry name="none" value="0" />
     <entry name="Structured" value="1" />
     <entry name="Raw" value="2" />
     <entry name="Tombstone" value="3" />
@@ -77,98 +80,69 @@
   </struct>
 
   <!--
-    src/object.rs: one object record, i.e. a header followed by `length`
-    payload bytes. Put the cursor on the object's UUID.
+    src/object.rs: one object record, i.e. the 24 byte ObjectHeader followed
+    by `length` payload bytes. Put the cursor on the object's UUID. Objects
+    start on 16 byte boundaries (Page::ALIGNMENT): the first at page offset
+    0x20, each next one at its start + 24 + length, rounded up to 16, with
+    zeroes in between.
 
-    uuid, length and kind are read first; what follows depends on kind. The
-    header comes in two shapes, told apart by the byte after the 24-bit
-    length (a valid kind is never 0, and a u32 length below 16 MiB always has
-    a zero top byte):
-      kind != 0  24 bytes as read_at_position parses them: uuid, u24 length,
-                 kind, CRC over bytes 0..20, then the payload
-      kind == 0  20 bytes as write_struct currently emits them: uuid, u32
-                 length, then the payload; no kind, no CRC. insert only stores
-                 Structured objects, so the payload is decoded as JSONB.
+    The CRC covers uuid, length as a u32 and the payload, but not kind.
     Structured payloads are Databend JSONB: the jsonb row shows the JSON
-    text, expanding it shows container header, JEntries and data.
+    text, expanding it shows container header, JEntries and data. Other kinds
+    show the raw data.
 
     (Okteta requires a tagged union to have fixed children to select on, so
     the header fields and the payload share one tagged union.)
   -->
   <struct name="Object record" byteOrder="little-endian">
     <taggedUnion name="record"
-                 validationFunc="function() { return importScript('jcake-db/common.js').validateObjectHeader(this); }">
+                 validationFunc="function() {
+                   var lib = importScript('jcake-db/common.js'), k = this.kind.value;
+                   var payload = k == 1 ? lib.jsonbStructBytes(this.jsonb)
+                       : k &gt;= 2 &amp;&amp; k &lt;= 4 ? lib.pushArray([], this.data) : [];
+                   return lib.validateObjectHeader(this, payload);
+                 }">
       <array name="uuid" length="16" typeName="UUID"
              toStringFunc="function() { return importScript('jcake-db/common.js').uuidToString(this); }">
         <primitive type="UInt8" />
       </array>
       <bitfield name="length" type="unsigned" width="24" />
       <enum name="kind" enum="ObjectKind" type="UInt8" />
+      <primitive name="crc" type="UInt32" />
       <alternatives>
-        <group structName="Structured, 24 byte header"
-               selectIf="function() { return this.kind.value == 1; }">
-          <primitive name="crc" type="UInt32" />
-          <struct name="jsonb" byteOrder="big-endian"
-                  toStringFunc="function() { return importScript('jcake-db/common.js').jsonbStructToJson(this); }">
-            <primitive name="container" type="UInt32"
-                       toStringFunc="function() { return importScript('jcake-db/common.js').describeContainer(this.value); }" />
-            <array name="jentries"
-                   length="function() { return importScript('jcake-db/common.js').jsonbEntryCount(this.parent.container.value); }">
-              <primitive type="UInt32" />
-            </array>
-            <array name="data"
-                   length="function() {
-                     var n = this.parent.parent.length.value - 4 - 4 * this.parent.jentries.length;
-                     return n &gt; 0 ? n : 0;
-                   }">
-              <primitive type="UInt8" />
-            </array>
-          </struct>
-        </group>
-        <group structName="20 byte write_struct header, assumed Structured"
-               selectIf="function() {
-                 return this.kind.value == 0 &amp;&amp; !importScript('jcake-db/common.js').isFreeSpace(this);
-               }">
-          <struct name="jsonb" byteOrder="big-endian"
-                  toStringFunc="function() { return importScript('jcake-db/common.js').jsonbStructToJson(this); }">
-            <primitive name="container" type="UInt32"
-                       toStringFunc="function() { return importScript('jcake-db/common.js').describeContainer(this.value); }" />
-            <array name="jentries"
-                   length="function() { return importScript('jcake-db/common.js').jsonbEntryCount(this.parent.container.value); }">
-              <primitive type="UInt32" />
-            </array>
-            <array name="data"
-                   length="function() {
-                     var n = this.parent.parent.length.value - 4 - 4 * this.parent.jentries.length;
-                     return n &gt; 0 ? n : 0;
-                   }">
-              <primitive type="UInt8" />
-            </array>
-          </struct>
-        </group>
-        <group structName="Raw, Tombstone or Reference, 24 byte header"
-               selectIf="function() { var k = this.kind.value; return k &gt;= 2 &amp;&amp; k &lt;= 4; }">
-          <primitive name="crc" type="UInt32" />
-          <array name="data" length="function() { return this.parent.length.value; }">
+        <struct name="jsonb" structName="Structured" byteOrder="big-endian"
+                selectIf="function() { return this.kind.value == 1; }"
+                toStringFunc="function() { return importScript('jcake-db/common.js').jsonbStructToJson(this); }">
+          <primitive name="container" type="UInt32"
+                     toStringFunc="function() { return importScript('jcake-db/common.js').describeContainer(this.value); }" />
+          <array name="jentries"
+                 length="function() { return importScript('jcake-db/common.js').jsonbEntryCount(this.parent.container.value); }">
+            <primitive type="UInt32" />
+          </array>
+          <array name="data"
+                 length="function() {
+                   var n = this.parent.parent.length.value - 4 - 4 * this.parent.jentries.length;
+                   return n &gt; 0 ? n : 0;
+                 }">
             <primitive type="UInt8" />
           </array>
-        </group>
+        </struct>
+        <array name="data" structName="Raw, Tombstone or Reference"
+               selectIf="function() { var k = this.kind.value; return k &gt;= 2 &amp;&amp; k &lt;= 4; }"
+               length="function() { return this.parent.length.value; }">
+          <primitive type="UInt8" />
+        </array>
       </alternatives>
       <defaultFields />
     </taggedUnion>
   </struct>
 
   <!--
-    src/page.rs: PageTrailer, the last 12 bytes of a sealed page. Its CRC also
-    covers the summary in front of it when there is one, so validating this
-    structure on its own is only checked when num_items == 0; use the walk
-    structure to check trailers with a summary.
+    src/page.rs: PageFooter, the last 12 bytes of a sealed page. Its CRC
+    covers "foot" and num_items only, not the summary in front of it.
   -->
   <struct name="Page trailer" byteOrder="little-endian"
-          validationFunc="function() {
-            if (this.num_items.value != 0) return undefined; // CRC covers the summary too; see the walk structure
-            return importScript('jcake-db/common.js').validateTrailer(this, null);
-          }">
+          validationFunc="function() { return importScript('jcake-db/common.js').validateTrailer(this); }">
     <array name="magic" length="4"
            validationFunc="function() { return importScript('jcake-db/common.js').checkMagic(this, 'foot'); }">
       <primitive type="Char" />
@@ -178,8 +152,9 @@
   </struct>
 
   <!--
-    src/page.rs: one entry of the summary table, which is the tag "smry"
-    followed by num_items of these, immediately before the trailer.
+    src/page.rs: one PageSummaryEntry. The summary is the tag "smry" followed
+    by num_items of these, immediately before the trailer. offset is relative
+    to the page start; the walk structure follows it and checks the uuid.
   -->
   <struct name="Page summary entry" byteOrder="little-endian">
     <array name="uuid" length="16" typeName="UUID"

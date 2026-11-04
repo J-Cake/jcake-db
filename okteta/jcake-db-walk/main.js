@@ -1,6 +1,7 @@
 // Okteta structure that walks a whole jcake-db file, starting at the
 // superblock: page_offset leads to page 0, and each page links to its
-// objects (one after another), its trailer and summary, and the next page.
+// objects (one after another, each on a 16 byte boundary), its trailer and
+// summary, and the next page.
 //
 // Okteta can only describe data that sits at fixed or pointed-to offsets, so
 // every link here is a pointer whose target address is computed from the
@@ -75,15 +76,15 @@ function pageOfObject(obj) {
     return via.name == 'objects' ? via.parent : pageOfObject(via.parent);
 }
 
+// From one object's start to the next one's, alignment padding included.
 function objectSize(obj) {
-    var h = obj.header;
-    return lib.objectHeaderSize(h) + h.length.value;
+    return lib.objectStride(obj.header.length.value);
 }
 
 function objectAddress(obj, root) {
     var via = obj.parent;
     if (via.name == 'objects') {
-        return pageAddress(via.parent, root) + lib.PAGE_HEADER_SIZE;
+        return pageAddress(via.parent, root) + lib.FIRST_OBJECT_OFFSET;
     }
     var prev = via.parent; // via next
     return objectAddress(prev, root) + objectSize(prev);
@@ -94,13 +95,16 @@ function trailerAddress(page, root) {
 }
 
 function firstObject(ptr, root) {
-    return pageAddress(ptr.parent, root) + lib.PAGE_HEADER_SIZE;
+    return pageAddress(ptr.parent, root) + lib.FIRST_OBJECT_OFFSET;
 }
 
 function nextObject(ptr, root) {
     var obj = ptr.parent, h = obj.header;
+    if (!h.wasAbleToRead) {
+        return lib.NOWHERE; // the header runs past the end of the file
+    }
     if (lib.isFreeSpace(h)) {
-        return lib.NOWHERE; // zeroed space after the last object
+        return lib.NOWHERE; // zeroes: padding or unused space after the last object
     }
     var kind = h.kind.value;
     if (kind > 4) {
@@ -108,23 +112,21 @@ function nextObject(ptr, root) {
     }
     var next = objectAddress(obj, root) + objectSize(obj);
     var limit = trailerAddress(pageOfObject(obj), root);
-    return next + lib.OBJECT_HEADER_SIZE_WRITTEN > limit ? lib.NOWHERE : next;
+    return next + lib.OBJECT_HEADER_SIZE > limit ? lib.NOWHERE : next;
 }
 
 // The payload sits behind pointers so that a corrupt length (running past
 // the end of the file) only makes the payload unreadable, not the header.
 function payload(ptr, root) {
     var obj = ptr.parent, h = obj.header;
-    if (lib.isFreeSpace(h)) {
+    if (!h.wasAbleToRead || lib.isFreeSpace(h)) {
         return lib.NOWHERE;
     }
-    return objectAddress(obj, root) + lib.objectHeaderSize(h);
+    return objectAddress(obj, root) + lib.OBJECT_HEADER_SIZE;
 }
 
-// Structured objects, and write_struct-layout ones (insert only stores Structured)
 function isJsonb(obj) {
-    var k = obj.header.kind.value;
-    return (k == 0 || k == 1) && !lib.isFreeSpace(obj.header);
+    return obj.header.wasAbleToRead && obj.header.kind.value == 1; // Structured
 }
 
 function jsonPayload(ptr, root) {
@@ -139,6 +141,13 @@ function trailer(ptr, root) {
     return trailerAddress(ptr.parent, root);
 }
 
+// A summary entry's offset is relative to its page:
+// offset -> entry -> entries -> summary struct -> summary link -> trailer union -> trailer link -> page
+function summaryTarget(ptr, root) {
+    var page = ptr.parent.parent.parent.parent.parent.parent.parent;
+    return pageAddress(page, root) + ptr.value;
+}
+
 function summary(ptr, root) {
     var t = ptr.parent, n = t.trailer.num_items.value;
     if (n == 0 || !lib.hasMagic(t.trailer.magic, 'foot')) {
@@ -149,28 +158,35 @@ function summary(ptr, root) {
 }
 
 // ---------------------------------------------------------------------------
-// Objects (src/object.rs); see main.osd's "Object record" for the two header layouts
+// Objects (src/object.rs), see main.osd's "Object record"
 
+function objectHeaderFields() {
+    return struct({
+        uuid: uuid(),
+        length: bitfield('unsigned', 24),
+        kind: enumeration('ObjectKind', uint8(), {
+            'none': 0,
+            'Structured': 1,
+            'Raw': 2,
+            'Tombstone': 3,
+            'Reference': 4
+        }),
+        crc: uint32()
+    });
+}
+
+// The CRC covers the payload, which sits behind the object's `data` link.
 function objectHeader() {
-    var h = taggedUnion(
-        {
-            uuid: uuid(),
-            length: bitfield('unsigned', 24),
-            kind: enumeration('ObjectKind', uint8(), {
-                'none (20 byte write_struct header)': 0,
-                'Structured': 1,
-                'Raw': 2,
-                'Tombstone': 3,
-                'Reference': 4
-            })
-        },
-        [
-            alternative(function() { return this.kind.value != 0; },
-                        { crc: uint32() },
-                        '24 byte header (read_at_position)')
-        ],
-        {});
-    h.validationFunc = function() { return lib.validateObjectHeader(this); };
+    var h = objectHeaderFields();
+    h.validationFunc = function() {
+        var data = this.parent.data.target, payload = null;
+        if (this.length.value == 0) {
+            payload = []; // nothing to read, possibly right at the end of the file
+        } else if (data.wasAbleToRead) {
+            payload = lib.pushArray([], data);
+        }
+        return lib.validateObjectHeader(this, payload);
+    };
     return h;
 }
 
@@ -213,6 +229,9 @@ function objectNode(index) {
     var node = union(fields);
     node.toStringFunc = function() {
         var h = this.header;
+        if (!h.wasAbleToRead) {
+            return '(header runs past the end of the file)';
+        }
         if (lib.isFreeSpace(h)) {
             return '(free space)';
         }
@@ -225,16 +244,20 @@ function objectNode(index) {
 // Pages (src/page.rs)
 
 function pageTrailer() {
-    var entry = struct({ uuid: uuid(), offset: uint32() });
+    var entry = struct({
+        uuid: uuid(),
+        offset: pointer(uint32(), objectHeaderFields(), 1, function(root) { return summaryTarget(this, root); })
+    });
+    entry.validationFunc = function() {
+        var header = this.offset.target;
+        return lib.validateSummaryEntry(this, header.wasAbleToRead ? header : null);
+    };
     var smry = struct({
         magic: magic('smry'),
         entries: array(entry, function() { return this.parent.parent.parent.trailer.num_items.value; })
     });
     var foot = struct({ magic: magic('foot'), num_items: uint32(), crc: uint32() });
-    foot.validationFunc = function() {
-        var n = this.num_items.value;
-        return lib.validateTrailer(this, n > 0 ? this.parent.summary.target : null);
-    };
+    foot.validationFunc = function() { return lib.validateTrailer(this); };
     return union({ trailer: foot, summary: link(smry, summary) });
 }
 

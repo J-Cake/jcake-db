@@ -6,14 +6,26 @@
 // (ES5): no let/const, arrow functions, typed arrays or BigInt.
 
 // ---------------------------------------------------------------------------
-// Constants mirrored from src/page.rs
+// Constants mirrored from src/page.rs and src/object.rs (the #[binary] sizes)
 
 var PAGE_HEADER_SIZE = 28;
 var PAGE_FOOTER_SIZE = 12;
 var PAGE_SUMMARY_HEADER_SIZE = 4;
 var PAGE_SUMMARY_ENTRY_SIZE = 20;
-var OBJECT_HEADER_SIZE = 24;         // what ObjectHeader::read_at_position expects
-var OBJECT_HEADER_SIZE_WRITTEN = 20; // what ObjectHeader::write_struct emits
+var OBJECT_HEADER_SIZE = 24;
+var OBJECT_ALIGNMENT = 16; // Page::ALIGNMENT, relative to the page start
+
+function roundUp(n, multiple) {
+    return Math.ceil(n / multiple) * multiple;
+}
+
+// Page-relative offset of the first object: the header, rounded up.
+var FIRST_OBJECT_OFFSET = roundUp(PAGE_HEADER_SIZE, OBJECT_ALIGNMENT);
+
+// Distance from one object's start to the next one's (PageIter::next).
+function objectStride(length) {
+    return roundUp(OBJECT_HEADER_SIZE + length, OBJECT_ALIGNMENT);
+}
 
 // A pointer target beyond any file; Okteta silently skips such pointers.
 var NOWHERE = 0xFFFFFFFF;
@@ -79,6 +91,10 @@ function checkCrc(data, bytes, stored, what) {
         return true;
     }
     data.validationError = what + ': stored ' + hex32(stored) + ', computed ' + hex32(expected);
+    if (((~expected) >>> 0) == stored) {
+        data.validationError += ' (stored is the bitwise NOT of the CRC: the final inversion was skipped, '
+            + 'as util::Crc::into_u32 does)';
+    }
     return false;
 }
 
@@ -153,58 +169,58 @@ function validatePageHeader(h) {
     return checkCrc(h, b, h.crc.value, 'page header CRC');
 }
 
-// The object header is a tagged union: when `kind` is 0 the bytes came from
-// ObjectHeader::write_struct (uuid + u32 length, no kind, no CRC), otherwise
-// they are the 24-byte layout ObjectHeader::read_at_position parses.
-function objectHeaderIsWrittenLayout(h) {
-    return h.kind.value == 0;
-}
-
-function objectHeaderSize(h) {
-    return objectHeaderIsWrittenLayout(h) ? OBJECT_HEADER_SIZE_WRITTEN : OBJECT_HEADER_SIZE;
-}
-
-// Zeroes where a header would be: the unused space between the last object
-// and the summary of a sealed (zero padded) page.
+// Zeroes where a header would be: alignment padding, or the unused space
+// between the last object and the summary of a sealed page.
 function isFreeSpace(h) {
     return h.length.value == 0 && h.kind.value == 0 && isNilUuid(h.uuid);
 }
 
-function validateObjectHeader(h) {
+// `payload` is the payload's bytes, or null if they couldn't be read (a
+// length running past the end of the file, for instance).
+function validateObjectHeader(h, payload) {
     if (isFreeSpace(h)) {
         return true;
-    }
-    if (objectHeaderIsWrittenLayout(h)) {
-        h.validationError = 'write_struct layout: only uuid + u32 length (20 bytes) were written, '
-            + 'but read_at_position expects uuid, u24 length, kind and CRC (24 bytes)';
-        return false;
     }
     var kind = h.kind.value;
     if (kind < 1 || kind > 4) {
         h.validationError = 'invalid object kind ' + kind;
         return false;
     }
+    if (payload === null) {
+        h.validationError = 'the payload (' + h.length.value + ' bytes) could not be read, '
+            + 'and the CRC covers it';
+        return false;
+    }
+    // BlockDriver::insert / Object::from_header: uuid, length as u32, payload.
+    // The kind byte is not covered.
     var b = pushArray([], h.uuid);
-    pushLE(b, h.length.value, 3);
-    b.push(kind);
-    return checkCrc(h, b, h.crc.value, 'header CRC over bytes 0..20');
+    pushLE(b, h.length.value, 4);
+    for (var i = 0; i < payload.length; i++) {
+        b.push(payload[i]);
+    }
+    return checkCrc(h, b, h.crc.value, 'object CRC over uuid, u32 length and payload');
 }
 
-// Trailer CRC as PageTrailer::write_struct computes it: over the summary (if
-// any) followed by "foot" and num_items. `summary` may be null.
-function validateTrailer(t, summary) {
-    var b = [];
-    if (summary) {
-        pushArray(b, summary.magic);
-        var entries = summary.entries;
-        for (var i = 0; i < entries.length; i++) {
-            pushArray(b, entries[i].uuid);
-            pushLE(b, entries[i].offset.value, 4);
-        }
-    }
-    pushArray(b, t.magic);
+// PageFooter: CRC over "foot" and num_items. The summary isn't covered.
+function validateTrailer(t) {
+    var b = pushArray([], t.magic);
     pushLE(b, t.num_items.value, 4);
     return checkCrc(t, b, t.crc.value, 'trailer CRC');
+}
+
+// A summary entry's offset is page-relative and should lead to an object
+// header with the same uuid. `header` is that header, or null if unreadable.
+function validateSummaryEntry(entry, header) {
+    if (header === null) {
+        entry.validationError = 'offset ' + entry.offset.value + ' does not lead to a readable object header';
+        return false;
+    }
+    var want = uuidToString(entry.uuid), got = uuidToString(header.uuid);
+    if (want != got) {
+        entry.validationError = 'the object at offset ' + entry.offset.value + ' is ' + got;
+        return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -453,13 +469,17 @@ function jsonbToJson(bytes) {
     }
 }
 
-// The same for a decoded `jsonb` structure (container, jentries, data).
-function jsonbStructToJson(s) {
+// The raw bytes of a decoded `jsonb` structure (container, jentries, data).
+function jsonbStructBytes(s) {
     var b = pushBE([], s.container.value, 4);
     var je = s.jentries;
     for (var i = 0; i < je.length; i++) {
         pushBE(b, je[i].value, 4);
     }
-    pushArray(b, s.data);
-    return jsonbToJson(b);
+    return pushArray(b, s.data);
+}
+
+// JSON text for a decoded `jsonb` structure.
+function jsonbStructToJson(s) {
+    return jsonbToJson(jsonbStructBytes(s));
 }

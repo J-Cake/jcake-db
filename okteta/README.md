@@ -89,14 +89,18 @@ selecting), they show `<EOF reached>` until you move it.
 page 0. Each page shows:
 
 - `header`: the page header.
-- `objects`: the first object. Each object has:
+- `objects`: the first object, at page offset 0x20. Objects start on 16-byte
+  boundaries relative to the page, so each `next` link skips the zero padding
+  after the previous payload. Each object has:
   - `header`: the object header.
   - `data`: a link to the raw payload bytes.
   - `json`: a link to the payload decoded as JSONB, whose row shows the JSON
     text. It reads `(not JSONB)` for Raw, Tombstone and Reference objects.
   - `next`: a link to the object after it.
 - `trailer`: the trailer at the end of the page and, if `num_items` isn't 0,
-  a `summary` link to the summary table.
+  a `summary` link to the summary table. Each summary entry's `offset` is a
+  pointer you can expand to the object header it names. Validation checks
+  that the header there has the entry's UUID.
 - `next_page`: the page after this one.
 
 Rows typed `link` are computed pointers. Okteta can only follow a pointer
@@ -106,7 +110,7 @@ instead. A link shows `(end)`, or isn't followed at all, when its target would
 be past the end of the file or past the page's trailer. It also stops at
 zeroed free space (shown as `(free space)`) and at a header with an impossible
 `kind`. A corrupt `length` only makes that object's payload unreadable: its
-header still shows, with the CRC error.
+header still shows, flagged as invalid because the CRC covers the payload.
 
 The walk is pre-built to `MAX_PAGES` pages and `MAX_OBJECTS_PER_PAGE` objects
 per page. Both are set at the top of `jcake-db-walk/main.js`.
@@ -118,18 +122,16 @@ From "jcake-db (fsdb)":
 - **Superblock** is locked to offset 0. Expand `page_offset` to follow the
   pointer to page 0's header.
 - **Page header**: 28 bytes.
-- **Object record**: put the cursor on an object's UUID. Its `record` row
-  says which layout was detected from the byte after the 24-bit length:
-  - non-zero: the 24-byte layout `ObjectHeader::read_at_position` parses
-    (uuid, u24 length, kind, CRC), followed by the payload.
-  - zero: the 20-byte layout `ObjectHeader::write_struct` currently writes
-    (uuid, u32 length), followed by the payload. This is flagged as invalid.
-
-  Structured payloads appear as a `jsonb` row showing the decoded JSON; other
-  kinds as raw `data`. If a corrupt length runs past the end of the file, the
-  whole record can't be read; the walker still shows such an object's header.
-- **Page trailer**: the 12-byte `foot` block. Its CRC also covers the summary,
-  so it's only checked here when `num_items` is 0.
+- **Object record**: put the cursor on an object's UUID, at a 16-byte
+  boundary relative to the page. The first object is at page offset 0x20. Its
+  `record` row holds the 24-byte header (uuid, u24 length, kind, CRC) and the
+  payload. Structured payloads appear as a `jsonb` row showing the decoded
+  JSON; other kinds as raw `data`. The CRC covers the uuid, the length as a
+  u32 and the payload, but not the kind. If a corrupt length runs past the end
+  of the file, the whole record can't be read; the walker still shows such an
+  object's header.
+- **Page trailer**: the 12-byte `foot` block. Its CRC covers `foot` and
+  `num_items` only.
 - **Page summary entry**: one 20-byte `(uuid, offset)` record in the `smry`
   table.
 
@@ -137,7 +139,9 @@ From "jcake-db (fsdb)":
 
 Run **Validate** to check magic numbers and CRC-32C checksums. A field that
 fails turns red, and its tooltip gives the reason, for example
-`page header CRC: stored 0x…, computed 0x…`.
+`page header CRC: stored 0x…, computed 0x…`. If the stored value is the
+bitwise NOT of the computed one, the message says so: the writer skipped the
+CRC's final inversion.
 
 ### JSONB decoding
 
@@ -157,7 +161,7 @@ node okteta/tools/dump.js fs.db
 ```
 
 ```bash
-node okteta/tools/dump.js fs.db 'Object record' 0x1001c
+node okteta/tools/dump.js fs.db 'Object record' 0x10020
 ```
 
 The first command walks the whole file. The second applies one structure from
