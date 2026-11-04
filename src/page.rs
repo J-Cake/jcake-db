@@ -67,6 +67,7 @@ struct PageTrailer {
 
 impl Page {
 	pub(crate) const FIRST_PAGE_OFFSET: u64 = 0x1_0000;
+	pub(crate) const ALIGNMENT: u64 = 0x10;
 
 	pub(crate) fn new(seq: u64, size: usize) -> Page {
 		Self {
@@ -153,7 +154,7 @@ impl Page {
 	pub(crate) fn iter<'a, Dev: Device>(&'a self, mut dev: Reader<'a, Dev>) -> PageIter<'a, Dev> {
 		dev.seek_to(self.page_start);
 		PageIter {
-			offset: PageHeader::SIZE as Offset,
+			offset: PageHeader::SIZE.next_multiple_of(Page::ALIGNMENT as usize) as Offset,
 			page: self,
 			backing: dev,
 			did_return_error: false
@@ -163,13 +164,15 @@ impl Page {
 	/// Get the offset of the position to insert the next object **relative to the start of the page**
 	pub(crate) fn next_free(&self, dev: Reader<impl Device>) -> Option<Offset> {
 		if let Some(last) = self.contents.as_ref().and_then(|content| content.last()) {
-			return Some(last.length as Offset + PageHeader::SIZE as Offset);
+			return Some((last.length as Offset + PageHeader::SIZE as Offset)
+				.next_multiple_of(Page::ALIGNMENT as u32));
 		}
 
 		self.iter(dev)
 			.try_fold(None, |_, r| r.map(Some))
 			.ok()?
 			.map(|i| i.length as Offset + ObjectHeader::SIZE as Offset)
+			.map(|i| i.next_multiple_of(Page::ALIGNMENT as u32))
 	}
 
 	pub(crate) fn get_object_at(&self, offset: Offset, mut dev: Reader<impl Device>) -> Result<Option<Object>> {
