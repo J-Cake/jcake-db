@@ -1,19 +1,13 @@
-use std::ops::Deref;
-use std::sync::Arc;
-use nom::bytes::{tag, take};
-use nom::{IResult, Parser};
-use nom::combinator::map;
-use nom::error::ErrorKind;
-use nom::number::{le_u24, le_u32, u8};
-use nom::sequence::preceded;
-use uuid::Uuid;
-use crate::Result;
 use crate::Error;
-use crate::BinaryRepresentation;
-use crate::crc::{check_crc, Crc};
-use crate::file::Offset;
-use crate::io_utils::{Device, Reader, Writer};
-use crate::page::Page;
+use crate::Result;
+use format::binary;
+use std::convert::Infallible;
+use std::sync::Arc;
+use util::binary::Fixed;
+use util::binary::u24;
+use util::Device;
+use util::Reader;
+use uuid::Uuid;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,17 +32,47 @@ impl TryFrom<u8> for ObjectKind {
 	}
 }
 
+impl TryFrom<ObjectKind> for u8 {
+	type Error = Infallible;
+
+	fn try_from(value: ObjectKind) -> std::result::Result<Self, Self::Error> {
+		Ok(value as u8)
+	}
+}
+
+impl Fixed for ObjectKind {
+	const SIZE: usize = u8::SIZE;
+
+	fn parse(buf: &[u8]) -> Result<Self> {
+		u8::parse(buf).and_then(Self::try_from)
+	}
+
+	fn serialize(&self, buf: &mut [u8]) -> Result<()> {
+		u8::serialize(&(*self as u8), buf)
+	}
+}
+
 pub struct Object {
 	header: ObjectHeader,
 	pub(crate) data: ObjectData
 }
 
+#[binary(Uuid(uuid), u24(len), u8(kind), u32(crc), ptr(offset))]
 pub(crate) struct ObjectHeader {
+	#[from(uuid)]
 	pub(crate) uuid: Uuid,
+
+	#[from(len)]
 	pub(crate) length: usize,
+
+	#[from(kind)]
 	pub(crate) kind: ObjectKind,
-	pub(crate) offset: Offset,
+
+	#[from(crc)]
 	pub(crate) crc: u32,
+
+	#[from(offset)]
+	pub(crate) position: u64
 }
 
 impl ObjectHeader {
@@ -56,7 +80,8 @@ impl ObjectHeader {
 		self.length
 	}
 
-	pub(crate) fn into_object(self, dev: Reader<impl Device>) -> Result<Object> {
+	/// Expects the reader to be seeked to the correct position
+	pub(crate) fn into_object(self, dev: &mut Reader<impl Device>) -> Result<Object> {
 		Object::from_header(self, dev)?
 			.ok_or(Error::new("Attempted to construct object from invalid header"))
 	}
@@ -66,17 +91,16 @@ impl Object {
 		self.header.length
 	}
 
-	pub(crate) fn from_header(header: ObjectHeader, mut dev: Reader<impl Device>) -> Result<Option<Self>> {
-		dev.seek_to(header.offset as u64 + Page::OBJECT_HEADER_SIZE);
+	pub(crate) fn from_header(header: ObjectHeader, dev: &mut Reader<impl Device>) -> Result<Option<Self>> {
 		let data = dev.read(header.length)?;
 
-		let mut crc = Crc::new();
+		let mut crc = util::Crc::new();
 
 		crc.update(header.uuid.as_bytes());
 		crc.update((header.length as u32).to_le_bytes());
 		crc.update(&data);
 
-		if crc.finish() == header.crc.to_le_bytes() {
+		if crc.into_u32() == header.crc {
 			Ok(Some(Self {
 				header,
 				data: ObjectData::Owned(data)
@@ -100,71 +124,5 @@ impl std::ops::Deref for Object {
 			ObjectData::Owned(v) => v,
 			ObjectData::Shared(s) => (**s).as_ref(),
 		}
-	}
-}
-
-impl<Dev: Device> BinaryRepresentation<Dev> for ObjectHeader {
-	fn read_at_position(mut backend: Reader<Dev>) -> Result<Self> where Self: Sized {
-		let offset = backend.position();
-		let input = backend.read(Page::OBJECT_HEADER_SIZE as usize)?;
-		let obj = try {
-			let (input, uuid) = map(take(16usize), Uuid::from_slice)
-				.parse(&input)?;
-
-			let uuid =
-				uuid.map_err(|err| nom::Err::Error(nom::error::Error::new(input, ErrorKind::IsNot)))?;
-
-			let (_, (len, flags, crc)) = (le_u24(), u8(), le_u32())
-				.parse_complete(input)?;
-
-			(uuid, len as usize, flags, crc)
-		};
-
-		let (uuid, len, flags, crc) = obj.map_err(|err| Error::new(err.to_string()))?;
-
-		// We can't check the CRC here, because it depends on the data.
-
-		Ok(ObjectHeader {
-			length: len,
-			uuid,
-			crc,
-			kind: flags.try_into()?,
-			offset: offset as u32
-		})
-	}
-
-	fn write_struct(&self, dev: &mut Writer<Dev>) -> Result<()> {
-		let mut vec = vec![];
-
-		assert!(self.length <= 0xFF_FFFF);
-
-		vec.extend_from_slice(self.uuid.as_bytes());
-		vec.extend_from_slice(&(self.length as u32).to_le_bytes()[..3]);
-		vec.extend_from_slice(&[self.kind as u8]);
-		vec.extend_from_slice(&self.crc.to_le_bytes());
-
-		dev.append(&vec)?;
-
-		Ok(())
-	}
-}
-
-impl<Dev: Device> BinaryRepresentation<Dev> for Object {
-	fn read_at_position(mut backend: Reader<Dev>) -> Result<Self> where Self: Sized {
-		let header = ObjectHeader::read_at_position(backend.clone())?;
-
-		let data = backend.read(header.length)?;
-
-		Ok(Object {
-			header,
-			data: ObjectData::Owned(data),
-		})
-	}
-
-	fn write_struct(&self, dev: &mut Writer<Dev>) -> Result<()> {
-		self.header.write_struct(dev)?;
-		dev.append(&self)?;
-
-		Ok(())
 	}
 }

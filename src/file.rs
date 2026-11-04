@@ -1,25 +1,21 @@
-use crate::{object, BinaryRepresentation, Error};
+use crate::Error;
 use crate::ObjectStore;
 use crate::Result;
-use crate::crc::{check_crc, Crc};
-use crate::io_utils::{Device, Reader, Writer};
-use crate::object::{Object, ObjectHeader, ObjectKind};
-use crate::page::Page;
-use nom::Parser;
-use nom::bytes::tag;
-use nom::bytes::take;
-use nom::combinator::map;
-use nom::error::ErrorKind;
-use nom::number::le_u32;
-use nom::sequence::preceded;
+use crate::object::Object;
+use crate::object::ObjectHeader;
+use crate::object::ObjectKind;
+use crate::page::{Page, PageHeader};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
 use std::path::Path;
-use std::path::PathBuf;
+use util::Device;
+use util::Writer;
 use uuid::Uuid;
+use format::binary;
+use util::binary::{Binary, Fixed};
 
 pub struct BlockDriver<Backing: Device> {
     // path: PathBuf,
@@ -38,42 +34,22 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
     pub const PAGE_SIZE: usize = 16_777_216;
 
     fn open(dev: BlockDev) -> Result<Self> {
-        let input = dev.read_at(0, 36)?;
-        let superblock = try {
-            let (input, uuid) =
-                map(preceded(tag(&b"fsdb"[..]), take(16usize)), Uuid::from_slice).parse(&input)?;
+        let dev = Writer::new(dev);
+        let superblock = Superblock::read(&mut dev.reader())?;
 
-            let uuid = uuid
-                .map_err(|err| nom::Err::Error(nom::error::Error::new(input, ErrorKind::IsNot)))?;
-
-            let (_, (version, block_size, block_offset, crc)) =
-                (le_u32(), le_u32(), le_u32(), le_u32()).parse_complete(input)?;
-
-            (
-                crc,
-                BlockDriver {
-                    backing: Writer::new(dev),
-
-                    uuid,
-                    version,
-                    page_size: block_size,
-                    page_offset: block_offset,
-
-                    active_page: None,
-
-                    index: None,
-                },
-            )
+        let mut driver = Self {
+            backing: dev,
+            uuid: superblock.uuid,
+            version: superblock.version,
+            page_size: superblock.page_size,
+            page_offset: superblock.page_offset,
+            index: None,
+            active_page: None,
         };
 
-        match superblock {
-            Ok((crc, mut driver)) if check_crc(&input[0..32], crc) => {
-                BlockDriver::index(&mut driver)?;
-                Ok(driver)
-            }
-            Ok(_) => Err(crate::Error::new("Superblock corrupt.")),
-            Err(err) => Err(crate::Error::new(err.to_string())),
-        }
+        driver.index()?;
+
+        Ok(driver)
     }
 
     fn blank(dev: BlockDev) -> Result<Self> {
@@ -89,19 +65,17 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
             index: Some(Index::with_hasher(BuildHasherDefault::new())),
         };
 
-        let mut vec = Vec::new();
-        vec.extend_from_slice(&b"fsdb"[..]);
-        vec.extend_from_slice(driver.uuid.as_bytes());
-        vec.extend_from_slice(&driver.version.to_le_bytes()[..]);
-        vec.extend_from_slice(&driver.page_size.to_le_bytes()[..]);
-        vec.extend_from_slice(&driver.page_offset.to_le_bytes()[..]);
-        vec.extend_from_slice(&crate::crc(&vec)[..]);
+        let superblock = Superblock {
+            uuid: driver.uuid,
+            version: driver.version,
+            page_size: driver.page_size,
+            page_offset: driver.page_offset,
+        };
 
-        driver.backing.append(&vec)?;
-        driver.backing.advance_to_alignment(driver.page_offset as u64);
-
-        let page = Page::new(0, Self::PAGE_SIZE);
+        superblock.write(&mut driver.backing)?;
+        let page = Page::new(0, driver.page_size as usize);
         page.write_struct(&mut driver.backing)?;
+
         driver.active_page.replace(page);
 
         Ok(driver)
@@ -109,7 +83,9 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
 
     fn load_page(&self, page_number: PageNr) -> Result<Page> {
         // TODO: reuse parsed headers; they're not gonna change
-        Ok(Page::read_struct(self.backing.reader(), self.page_offset as u64 + page_number as u64 * self.page_size as u64)?)
+        let mut reader = self.backing.reader();
+        reader.seek_to(self.page_offset as u64 + page_number as u64 * self.page_size as u64);
+        Ok(Page::read_struct(&mut reader)?)
     }
 
     fn index(&mut self) -> Result<()> {
@@ -140,10 +116,12 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
                     continue;
                 }
 
+                let page_offset = page.page_start - record.position;
+
                 index
                     .entry(record.uuid.as_u128())
-                    .and_modify(|entry| entry.insert(page_nr as PageNr, record.offset))
-                    .or_insert(Location::new(page_nr as PageNr, record.offset));
+                    .and_modify(|entry| entry.insert(page_nr as PageNr, self.page_offset as Offset))
+                    .or_insert(Location::new(page_nr as PageNr, page_offset as Offset));
             }
         }
 
@@ -154,6 +132,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
 
     fn active_page_mut(&mut self) -> &mut Page {
         if let Some(ref mut page) = self.active_page && !page.is_sealed() {
+            page.contents.get_or_insert_with(Default::default);
             return page;
         }
 
@@ -167,12 +146,14 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         }
 
         if let Some(ref mut page) = self.active_page && !page.is_sealed() {
+            page.contents.get_or_insert_with(Default::default);
             return page;
         }
 
         self.index().expect("Failed to index database");
 
         if let Some(ref mut page) = self.active_page && !page.is_sealed() {
+            page.contents.get_or_insert_with(Default::default);
             return page;
         }
 
@@ -272,28 +253,31 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
             self.new_page()?;
         }
 
-        let mut crc = Crc::new();
+        let mut crc = util::Crc::new();
         let uuid = Uuid::new_v4();
 
         crc.update(uuid);
         crc.update((data.len() as u32).to_le_bytes());
+        crc.update(data);
 
         // We've called `.active_page_mut()` enough to be reasonably sure that it's set
-        let offset = self.active_page.as_ref()
+        let page_offset = self.active_page.as_ref()
             .and_then(|page| page.next_free(self.backing.reader()))
-            .unwrap_or(Page::PAGE_HEADER_SIZE as Offset);
+            .unwrap_or(PageHeader::SIZE as Offset)
+            .next_multiple_of(0x10);
+
+        let seek = self.active_page_mut().page_start + page_offset as u64;
 
         let obj = ObjectHeader {
             uuid,
             length: data.len(),
             kind: ObjectKind::Structured,
-            crc: u32::from_le_bytes(crc.finish()),
-            offset,
+            crc: crc.into_u32(),
+            position: seek,
         };
 
-        let seek = self.active_page_mut().page_offset + offset as u64;
         self.backing.try_seek_to(seek)?;
-        obj.write_struct(&mut self.backing)?;
+        obj.write(&mut self.backing)?;
         self.backing.append(data)?;
 
         self.active_page_mut()
@@ -306,7 +290,7 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         let page = self.active_page_mut().seq;
         if let Err(err) = self.index
             .get_or_insert_with(|| Default::default())
-            .try_insert(uuid.as_u128(), Location::new(page, offset)) {
+            .try_insert(uuid.as_u128(), Location::new(page, page_offset)) {
             return Err(Error::new("Object already inserted."));
         };
 
@@ -330,4 +314,19 @@ impl<'store, Store: ObjectStore> Iterator for ObjectIterator<'store, Store> {
     fn next(&mut self) -> Option<Self::Item> {
         todo!()
     }
+}
+
+#[binary(magic(b"fsdb"), Uuid(uuid), u32(version), u32(page_size), u32(page_offset), crc(magic, uuid, version, page_size, page_offset))]
+struct Superblock {
+    #[from(uuid)]
+    uuid: Uuid,
+
+    #[from(version)]
+    version: u32,
+
+    #[from(page_size)]
+    page_size: u32,
+
+    #[from(page_offset)]
+    page_offset: Offset
 }

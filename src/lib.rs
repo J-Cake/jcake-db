@@ -1,27 +1,24 @@
-#![feature(try_blocks)]
 #![feature(map_try_insert)]
+extern crate core;
 
 mod file;
-// mod superblock;
-mod error;
 mod page;
-mod crc;
 mod object;
-mod io_utils;
 
 use std::fs;
 use std::path::Path;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
-pub use error::Error;
 pub use file::BlockDriver;
-use crate::crc::crc;
-use crate::file::{blank, open};
-use crate::io_utils::{Device, Reader, Writer};
+pub use util::Device;
+pub use util::Error;
+pub use util::Reader;
+pub use util::Writer;
+pub use util::Result;
+use crate::file::blank;
+use crate::file::open;
 use crate::object::Object;
-
-pub(crate) type Result<T, Error = crate::Error> = std::result::Result<T, Error>;
 
 pub trait ObjectStore: Sized {
     fn compact_db(&mut self) -> Result<()>;
@@ -61,13 +58,4 @@ impl TypedDatabase<BlockDriver<fs::File>> {
             Ok(Self(blank(path)?))
         }
     }
-}
-
-pub(crate) trait BinaryRepresentation<Dev: Device> {
-    fn read_struct(mut backend: Reader<Dev>, pos: u64) -> Result<Self> where Self: Sized {
-        backend.seek_to(pos);
-        Self::read_at_position(backend)
-    }
-    fn read_at_position(backend: Reader<Dev>) -> Result<Self> where Self: Sized;
-    fn write_struct(&self, backend: &mut Writer<Dev>) -> Result<()>;
 }

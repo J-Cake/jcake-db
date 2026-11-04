@@ -30,7 +30,7 @@ impl Error {
         }
     }
 
-    pub(crate) fn is_recoverable(&self) -> bool {
+    pub fn is_recoverable(&self) -> bool {
         self.recoverable
     }
 }

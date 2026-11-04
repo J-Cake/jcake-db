@@ -115,45 +115,45 @@ mod sys {
 }
 
 /// The only handle that can write. Append-only: `pos` never moves backwards.
-pub(crate) struct Writer<D: Device> {
+pub struct Writer<D: Device> {
 	dev: D,
 	pos: u64,
 }
 
 impl<D: Device> Writer<D> {
 	/// A new writer with effectively no end
-	pub(crate) fn new(dev: D) -> Self {
+	pub fn new(dev: D) -> Self {
 		Self { dev, pos: 0 }
 	}
 
 	/// `end` = current end of valid data (0 for a fresh file, or found by scanning).
-	pub(crate) fn with_end(dev: D, end: u64) -> Self {
+	pub fn with_end(dev: D, end: u64) -> Self {
 		Self { dev, pos: end }
 	}
 
 	/// Appends `data`, returns the offset it was written at.
-	pub(crate) fn append(&mut self, data: &[u8]) -> Result<u64> {
+	pub fn append(&mut self, data: &[u8]) -> Result<u64> {
 		let at = self.pos;
 		self.dev.write_at(at, data)?;
 		self.pos += data.len() as u64;
 		Ok(at)
 	}
 
-	pub(crate) fn position(&self) -> u64 {
+	pub fn position(&self) -> u64 {
 		self.pos
 	}
 
-	pub(crate) fn advance(&mut self, by: u64) -> &mut Self {
+	pub fn advance(&mut self, by: u64) -> &mut Self {
 		self.pos += by;
 		self
 	}
 
-	pub(crate) fn advance_to_alignment(&mut self, interval: u64) -> &mut Self {
+	pub fn advance_to_alignment(&mut self, interval: u64) -> &mut Self {
 		self.pos = self.pos.next_multiple_of(interval);
 		self
 	}
 
-	pub(crate) fn try_seek_to(&mut self, offset: u64) -> Result<&mut Self> {
+	pub fn try_seek_to(&mut self, offset: u64) -> Result<&mut Self> {
 		if self.pos > offset  {
 			return Err(Error::new("Attempted to move cursor backwards."))
 		}
@@ -162,22 +162,22 @@ impl<D: Device> Writer<D> {
 		Ok(self)
 	}
 
-	pub(crate) fn sync(&mut self) -> Result<()> {
+	pub fn sync(&mut self) -> Result<()> {
 		self.dev.sync()
 	}
 
 	/// A reader over everything written so far. Borrows `self`, so no appends while it lives.
-	pub(crate) fn reader(&self) -> Reader<'_, D> {
+	pub fn reader(&self) -> Reader<'_, D> {
 		Reader::new(&self.dev)
 	}
 
-	pub(crate) fn into_inner(self) -> D {
+	pub fn into_inner(self) -> D {
 		self.dev
 	}
 }
 
 /// Cheap, cloneable, read-only cursor. Never reads past `end`.
-pub(crate) struct Reader<'a, D: Device + ?Sized> {
+pub struct Reader<'a, D: Device + ?Sized> {
 	dev: &'a D,
 	pos: u64,
 	end: u64,
@@ -192,15 +192,15 @@ impl<D: Device> Clone for Reader<'_, D> {
 impl<'a, D: Device> Reader<'a, D> {
 
 	/// A new writer with effectively no end
-	pub(crate) fn new(dev: &'a D) -> Self {
+	pub fn new(dev: &'a D) -> Self {
 		Self { dev, pos: 0, end: u64::MAX }
 	}
 
 	/// Also usable without a writer, e.g. for a read-only open.
-	pub(crate) fn with_end(dev: &'a D, end: u64) -> Self {
+	pub fn with_end(dev: &'a D, end: u64) -> Self {
 		Self { dev, pos: 0, end }
 	}
-	pub(crate) fn read(&mut self, len: usize) -> Result<Box<[u8]>> {
+	pub fn read(&mut self, len: usize) -> Result<Box<[u8]>> {
 		if self.pos + len as u64 > self.end {
 			return Err(Error::recoverable("EOF"));
 		}
@@ -210,13 +210,13 @@ impl<'a, D: Device> Reader<'a, D> {
 		Ok(buf)
 	}
 
-	pub(crate) fn position(&self) -> u64 { self.pos }
-	pub(crate) fn remaining(&self) -> u64 { self.end - self.pos }
-	pub(crate) fn seek_to(&mut self, to: u64) { self.pos = to.min(self.end); }
-	pub(crate) fn seek_by(&mut self, by: i64) { self.seek_to((self.pos as i64 + by) as u64); }
+	pub fn position(&self) -> u64 { self.pos }
+	pub fn remaining(&self) -> u64 { self.end - self.pos }
+	pub fn seek_to(&mut self, to: u64) { self.pos = to.min(self.end); }
+	pub fn seek_by(&mut self, by: i64) { self.seek_to((self.pos as i64 + by) as u64); }
 
 	/// A sub-reader bounded to `[start, start + len)`, e.g. one page.
-	pub(crate) fn slice(&self, start: u64, len: u64) -> Self {
+	pub fn slice(&self, start: u64, len: u64) -> Self {
 		Self { dev: self.dev, pos: start, end: (start + len).min(self.end) }
 	}
 }

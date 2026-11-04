@@ -20,7 +20,7 @@ pub fn main() -> Result<()> {
             "email": "jakieschneider13@gmail.com"
         }
     }})?;
-    dbg!(db.search::<Message>(obj)?);
+    dbg!(db.search::<serde_json::Value>(obj)?);
 
     Ok(())
 }

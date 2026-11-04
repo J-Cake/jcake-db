@@ -17,30 +17,34 @@ const TABLE: [u32; 256] = {
 };
 
 /// Incremental CRC-32C, for checksumming several slices without concatenating them.
-pub(crate) struct Crc(u32);
+pub struct Crc(u32);
 
 impl Crc {
-	pub(crate) fn new() -> Self {
+	pub fn new() -> Self {
 		Self(!0)
 	}
 
-	pub(crate) fn update(&mut self, bytes: impl AsRef<[u8]>) -> &mut Self {
+	pub fn update(&mut self, bytes: impl AsRef<[u8]>) -> &mut Self {
 		for &b in bytes.as_ref() {
 			self.0 = TABLE[((self.0 ^ b as u32) & 0xFF) as usize] ^ (self.0 >> 8);
 		}
 		self
 	}
 
-	pub(crate) fn finish(&self) -> [u8; 4] {
+	pub fn finish(&self) -> [u8; 4] {
 		(!self.0).to_le_bytes()
+	}
+
+	pub fn into_u32(self) -> u32  {
+		self.0
 	}
 }
 
-pub(crate) fn crc(bytes: impl AsRef<[u8]>) -> [u8; 4] {
+pub fn crc(bytes: impl AsRef<[u8]>) -> [u8; 4] {
 	Crc::new().update(bytes).finish()
 }
 
-pub(crate) fn check_crc(bytes: impl AsRef<[u8]>, crc: u32) -> bool {
+pub fn check_crc(bytes: impl AsRef<[u8]>, crc: u32) -> bool {
 	Crc::new().update(bytes).finish() == crc.to_le_bytes()
 }
 
