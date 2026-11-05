@@ -104,14 +104,18 @@ impl Page {
 			None
 		};
 
-		Ok(Self {
+		let mut page = Self {
 			seq: header.seq,
 			page_start: offset,
 			page_size: header.page_size as usize,
 			contents: if summary.is_some() { None } else { Some(Default::default()) },
 			trailer: summary,
 			created: header.created,
-		})
+		};
+
+		page.preload_records(dev.clone())?;
+
+		Ok(page)
 	}
 
 	pub(crate) fn write_struct(&self, dev: &mut Writer<impl Device>) -> Result<()> {
@@ -193,11 +197,12 @@ impl Page {
 
 		let offset = c.last()
 			.map(|i| (i.position - self.page_start) as Offset + i.length as Offset + ObjectHeader::SIZE as Offset)
-			.unwrap_or(PageHeader::SIZE as Offset);
+			.unwrap_or(PageHeader::SIZE as Offset)
+			.next_multiple_of(Page::ALIGNMENT as u32);
 
 		let theoretical_summary_offset = self.page_size - PageFooter::SIZE - c.len() * PageSummaryEntry::SIZE - SUMMARY_MAGIC_NUMBER_LENGTH;
 
-		offset + len as Offset + ObjectHeader::SIZE as Offset > theoretical_summary_offset as Offset
+		(offset + len as Offset + ObjectHeader::SIZE as Offset) < theoretical_summary_offset as Offset
 	}
 }
 

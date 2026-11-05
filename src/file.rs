@@ -116,7 +116,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
                     continue;
                 }
 
-                let page_offset = page.page_start - record.position;
+                let page_offset = record.position - page.page_start;
 
                 index
                     .entry(record.uuid.as_u128())
@@ -249,7 +249,7 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         // 3. Take the latest page and write the object there.
         // 4. Update the page to include the object in the index
 
-        if self.active_page_mut().can_fit_object_of_length(data.len()) {
+        if !self.active_page_mut().can_fit_object_of_length(data.len()) {
             self.new_page()?;
         }
 
