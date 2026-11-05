@@ -113,7 +113,9 @@ impl Page {
 			created: header.created,
 		};
 
-		page.preload_records(dev.clone())?;
+		if !page.is_sealed() {
+			page.preload_records(dev.clone())?;
+		}
 
 		Ok(page)
 	}

@@ -116,6 +116,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
                 };
 
                 if record.kind == ObjectKind::Tombstone {
+                    index.remove(&record.uuid.as_u128());
                     continue;
                 }
 
@@ -123,7 +124,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
 
                 index
                     .entry(record.uuid.as_u128())
-                    .and_modify(|entry| entry.insert(page_nr as PageNr, self.page_offset as Offset))
+                    .and_modify(|entry| entry.insert(page_nr as PageNr, page_offset as Offset))
                     .or_insert(Location::new(page_nr as PageNr, page_offset as Offset));
             }
         }
@@ -247,6 +248,14 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
     }
 
     fn insert(&mut self, data: &[u8]) -> Result<Uuid> {
+        let uuid = Uuid::new_v4();
+
+        self.upsert(uuid, data)?;
+
+        Ok(uuid)
+    }
+
+    fn upsert(&mut self, uuid: Uuid, data: &[u8]) -> Result<()> {
         // 1. Check whether the current page has enough space on it
         // 2. Allocate a new page if necessary and write it into `self`
         // 3. Take the latest page and write the object there.
@@ -257,7 +266,6 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         }
 
         let mut crc = util::Crc::new();
-        let uuid = Uuid::new_v4();
 
         crc.update(uuid);
         crc.update((data.len() as u32).to_le_bytes());
@@ -297,15 +305,54 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
             return Err(Error::new("Object already inserted."));
         };
 
-        Ok(uuid)
+        Ok(())
     }
 
-    fn update(&mut self, id: Uuid, data: &[u8]) -> Result<()> {
-        todo!()
-    }
+    fn delete(&mut self, uuid: Uuid) -> Result<()> {
+        if !self.active_page_mut().can_fit_object_of_length(0) {
+            self.new_page()?;
+        }
 
-    fn delete(&mut self, id: Uuid) -> Result<()> {
-        todo!()
+        let mut crc = util::Crc::new();
+
+        crc.update(uuid);
+        crc.update([0u8; 4]);
+
+        // We've called `.active_page_mut()` enough to be reasonably sure that it's set
+        let page_offset = self.active_page.as_ref()
+            .and_then(|page| page.next_free(self.backing.reader()))
+            .unwrap_or(PageHeader::SIZE as Offset)
+            .next_multiple_of(Page::ALIGNMENT as u32);
+
+        let seek = self.active_page_mut().page_start + page_offset as u64;
+
+        let obj = ObjectHeader {
+            uuid,
+            length: 0,
+            kind: ObjectKind::Tombstone,
+            crc: crc.into_u32(),
+            position: seek,
+        };
+
+        self.backing.try_seek_to(seek)?;
+        obj.write(&mut self.backing)?;
+
+        self.active_page_mut()
+            .contents
+            .get_or_insert(vec![])
+            .push(obj);
+
+        self.backing.sync()?;
+
+        self.active_page_mut()
+            .contents
+            .get_or_insert_with(|| Default::default())
+            .push(obj);
+
+        self.index.get_or_insert_with(|| Default::default())
+            .remove(&uuid.as_u128());
+
+        Ok(())
     }
 }
 
