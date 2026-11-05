@@ -179,7 +179,7 @@ impl Page {
 	pub(crate) fn next_free(&self, dev: Reader<impl Device>) -> Option<Offset> {
 		if let Some(last) = self.contents.as_ref().and_then(|content| content.last()) {
 			let page_offset = (last.position - self.page_start) as Offset;
-			return Some((page_offset + last.length as Offset + PageHeader::SIZE as Offset)
+			return Some((page_offset + last.length as Offset + ObjectHeader::SIZE as Offset)
 				.next_multiple_of(Page::ALIGNMENT as u32));
 		}
 
@@ -243,9 +243,10 @@ impl<'a, Dev: Device> Iterator for PageIter<'a, Dev> {
 		}
 
 		match self.advance {
-			IterAdvance::FromCache { cache, index: offset } => {
-				if offset < cache.len() {
-					Some(Ok(cache[offset]))
+			IterAdvance::FromCache { cache, ref mut index } => {
+				if *index < cache.len() {
+					*index += 1;
+					Some(Ok(cache[*index - 1]))
 				} else {
 					None
 				}

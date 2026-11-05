@@ -106,11 +106,10 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
 
         let mut index = Index::with_capacity_and_hasher(records, BuildHasherDefault::new());
 
-        for page_nr in 0..max_page {
+        for page_nr in 0..=max_page {
             let page = self.load_page(page_nr)?;
 
             for record in page.iter(self.backing.reader()) {
-                dbg!(&record);
                 let Ok(record) = record else {
                     continue;
                 };
@@ -299,11 +298,9 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         self.backing.sync()?;
 
         let page = self.active_page_mut().seq;
-        if let Err(err) = self.index
+        self.index
             .get_or_insert_with(|| Default::default())
-            .try_insert(uuid.as_u128(), Location::new(page, page_offset)) {
-            return Err(Error::new("Object already inserted."));
-        };
+            .insert(uuid.as_u128(), Location::new(page, page_offset));
 
         Ok(())
     }
@@ -343,11 +340,6 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
             .push(obj);
 
         self.backing.sync()?;
-
-        self.active_page_mut()
-            .contents
-            .get_or_insert_with(|| Default::default())
-            .push(obj);
 
         self.index.get_or_insert_with(|| Default::default())
             .remove(&uuid.as_u128());
