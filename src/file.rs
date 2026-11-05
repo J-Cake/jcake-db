@@ -90,10 +90,12 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
 
     fn index(&mut self) -> Result<()> {
         let mut records = 0usize;
+        let mut max_page = 0 as PageNr;
         for page_nr in 0 as PageNr.. {
             let mut page = self.load_page(page_nr)?;
 
             records += page.count_records(self.backing.reader());
+            max_page = page_nr;
 
             if !page.is_sealed() {
                 page.preload_records(self.backing.reader())?;
@@ -104,10 +106,11 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
 
         let mut index = Index::with_capacity_and_hasher(records, BuildHasherDefault::new());
 
-        for page_nr in 0..records as PageNr {
+        for page_nr in 0..max_page {
             let page = self.load_page(page_nr)?;
 
             for record in page.iter(self.backing.reader()) {
+                dbg!(&record);
                 let Ok(record) = record else {
                     continue;
                 };

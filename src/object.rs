@@ -58,6 +58,7 @@ pub struct Object {
 }
 
 #[binary(Uuid(uuid), u24(len), u8(kind), u32(crc), ptr(offset))]
+#[derive(Copy, Clone, Debug)]
 pub(crate) struct ObjectHeader {
 	#[from(uuid)]
 	pub(crate) uuid: Uuid,

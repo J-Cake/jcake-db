@@ -158,25 +158,37 @@ impl Page {
 	pub(crate) fn iter<'a, Dev: Device>(&'a self, mut dev: Reader<'a, Dev>) -> PageIter<'a, Dev> {
 		dev.seek_to(self.page_start);
 		PageIter {
-			offset: PageHeader::SIZE.next_multiple_of(Page::ALIGNMENT as usize) as Offset,
 			page: self,
 			backing: dev,
-			did_return_error: false
+			did_return_error: false,
+			advance: IterAdvance::FromDisk {
+				offset: PageHeader::SIZE.next_multiple_of(Page::ALIGNMENT as usize) as Offset
+			}
+			// advance: match self.contents {
+			// 	Some(ref cache) => IterAdvance::FromCache {
+			// 		cache,
+			// 		index: 0
+			// 	},
+			// 	None => IterAdvance::FromDisk {
+			// 		offset: PageHeader::SIZE.next_multiple_of(Page::ALIGNMENT as usize) as Offset
+			// 	}
+			// }
 		}
 	}
 
 	/// Get the offset of the position to insert the next object **relative to the start of the page**
 	pub(crate) fn next_free(&self, dev: Reader<impl Device>) -> Option<Offset> {
 		if let Some(last) = self.contents.as_ref().and_then(|content| content.last()) {
-			return Some((last.length as Offset + PageHeader::SIZE as Offset)
+			let page_offset = (last.position - self.page_start) as Offset;
+			return Some((page_offset + last.length as Offset + PageHeader::SIZE as Offset)
 				.next_multiple_of(Page::ALIGNMENT as u32));
 		}
 
 		self.iter(dev)
 			.try_fold(None, |_, r| r.map(Some))
 			.ok()?
-			.map(|i| i.length as Offset + ObjectHeader::SIZE as Offset)
-			.map(|i| i.next_multiple_of(Page::ALIGNMENT as u32))
+			.map(|i| (i.position - self.page_start) as Offset + i.length as Offset + ObjectHeader::SIZE as Offset)
+			.map(|i| i.next_multiple_of(Page::ALIGNMENT as Offset))
 	}
 
 	pub(crate) fn get_object_at(&self, offset: Offset, mut dev: Reader<impl Device>) -> Result<Option<Object>> {
@@ -207,10 +219,20 @@ impl Page {
 }
 
 pub(crate) struct PageIter<'a, Dev: Device> {
-	offset: Offset,
 	page: &'a Page,
 	backing: Reader<'a, Dev>,
-	did_return_error: bool
+	did_return_error: bool,
+	advance: IterAdvance<'a>
+}
+
+enum IterAdvance<'a> {
+	FromCache {
+		cache: &'a [ObjectHeader],
+		index: usize
+	},
+	FromDisk {
+		offset: Offset
+	}
 }
 
 impl<'a, Dev: Device> Iterator for PageIter<'a, Dev> {
@@ -221,21 +243,32 @@ impl<'a, Dev: Device> Iterator for PageIter<'a, Dev> {
 			return None;
 		}
 
-		self.backing.seek_to(self.page.page_start + self.offset as u64);
-		match ObjectHeader::read(&mut self.backing) {
-			Ok(header) => {
-				self.offset += (ObjectHeader::SIZE as Offset + header.len() as Offset)
-					.next_multiple_of(Page::ALIGNMENT as u32);
-				if self.offset > self.page.page_size as Offset - PageFooter::SIZE as Offset {
-					return None;
+		match self.advance {
+			IterAdvance::FromCache { cache, index: offset } => {
+				if offset < cache.len() {
+					Some(Ok(cache[offset]))
+				} else {
+					None
 				}
-				Some(Ok(header))
 			}
-			Err(e) if e.is_recoverable() => None,
-			Err(e) => {
-				self.did_return_error = true;
-				Some(Err(e))
-			},
+			IterAdvance::FromDisk { ref mut offset } => {
+				self.backing.seek_to(self.page.page_start + *offset as u64);
+				match ObjectHeader::read(&mut self.backing) {
+					Ok(header) => {
+						*offset += (ObjectHeader::SIZE as Offset + header.len() as Offset)
+							.next_multiple_of(Page::ALIGNMENT as u32);
+						if *offset > self.page.page_size as Offset - PageFooter::SIZE as Offset {
+							return None;
+						}
+						Some(Ok(header))
+					}
+					Err(e) if e.is_recoverable() => None,
+					Err(e) => {
+						self.did_return_error = true;
+						Some(Err(e))
+					},
+				}
+			}
 		}
 	}
 }
