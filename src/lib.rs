@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::json;
 use uuid::Uuid;
 pub use file::BlockDriver;
 pub use util::Device;
@@ -26,7 +27,7 @@ pub trait ObjectStore: Sized {
 
     fn search(&self, id: Uuid) -> Result<Option<Object>>;
     fn insert(&mut self, data: &[u8]) -> Result<Uuid>;
-    fn update(&mut self, id: Uuid, data: &[u8]) -> Result<()>;
+    fn upsert(&mut self, id: Uuid, data: &[u8]) -> Result<()>;
     fn delete(&mut self, id: Uuid) -> Result<()>;
 }
 
@@ -38,6 +39,11 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
         self.0.insert(&obj.as_ref())
     }
 
+    pub fn upsert(&mut self, uuid: Uuid, data: impl Serialize) -> Result<()> {
+        let obj = jsonb::to_owned_jsonb(&data)?;
+        self.0.upsert(uuid, &obj.as_ref())
+    }
+
     pub fn search<T: DeserializeOwned>(&self, id: Uuid) -> Result<Option<T>> {
         let Some(obj) = self.0.search(id)? else {
             return Ok(None);
@@ -47,6 +53,10 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
             .map_err(Into::<Error>::into)?;
 
         Ok(Some(obj))
+    }
+
+    pub fn delete(&mut self, uuid: Uuid) -> Result<()> {
+        self.0.delete(uuid)
     }
 }
 

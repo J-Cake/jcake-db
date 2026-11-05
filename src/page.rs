@@ -113,7 +113,9 @@ impl Page {
 			created: header.created,
 		};
 
-		page.preload_records(dev.clone())?;
+		if !page.is_sealed() {
+			page.preload_records(dev.clone())?;
+		}
 
 		Ok(page)
 	}
@@ -161,18 +163,15 @@ impl Page {
 			page: self,
 			backing: dev,
 			did_return_error: false,
-			advance: IterAdvance::FromDisk {
-				offset: PageHeader::SIZE.next_multiple_of(Page::ALIGNMENT as usize) as Offset
+			advance: match self.contents {
+				Some(ref cache) => IterAdvance::FromCache {
+					cache,
+					index: 0
+				},
+				None => IterAdvance::FromDisk {
+					offset: PageHeader::SIZE.next_multiple_of(Page::ALIGNMENT as usize) as Offset
+				}
 			}
-			// advance: match self.contents {
-			// 	Some(ref cache) => IterAdvance::FromCache {
-			// 		cache,
-			// 		index: 0
-			// 	},
-			// 	None => IterAdvance::FromDisk {
-			// 		offset: PageHeader::SIZE.next_multiple_of(Page::ALIGNMENT as usize) as Offset
-			// 	}
-			// }
 		}
 	}
 
