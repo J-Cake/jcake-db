@@ -3,14 +3,14 @@
 Two structure definitions for Okteta's Structures tool describe the on-disk
 format of database files:
 
-- `jcake-db/` ("jcake-db (fsdb)"): the individual structures (superblock,
+- `jcake-db` ("jcake-db (fsdb)"): the individual structures (superblock,
   page header, object record, page trailer, summary entry), to apply at the
   cursor. It also holds `common.js`, the helpers both definitions use: CRC-32C,
   the validators, and the JSONB decoder.
-- `jcake-db-walk/` ("jcake-db: walk file"): one structure locked to offset 0
+- `jcake-db-walk` ("jcake-db: walk file"): one structure locked to offset 0
   that walks the whole file. It goes from the superblock to each page, then
   through every object on it, then to the page's trailer and summary and on to
-  the next page. It needs `jcake-db/` installed alongside it.
+  the next page. It needs `jcake-db` installed alongside it.
 
 `tools/dump.js` prints the same view from the command line, with no Okteta
 needed (see [Without Okteta](#without-okteta)).
@@ -69,7 +69,7 @@ under Filesystem → Other files.
 
 Recent Okteta versions can also install the folders for you: click
 **Install from File(s)…** in the Structures management settings and pick
-`okteta/jcake-db`, then `okteta/jcake-db-walk`. It copies them into the
+`jcake-db`, then `jcake-db-walk`. It copies them into the
 Flatpak data directory above.
 
 ### Enable

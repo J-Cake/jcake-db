@@ -1,3 +1,4 @@
 # Project exclude paths
 target/
 fs.db
+/intellij-hexeditor-0.1.0.zip

@@ -73,10 +73,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         };
 
         superblock.write(&mut driver.backing)?;
-        let page = Page::new(0, driver.page_size as usize);
-        page.write_struct(&mut driver.backing)?;
-
-        driver.active_page.replace(page);
+        driver.new_page()?;
 
         Ok(driver)
     }
@@ -164,7 +161,12 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
     }
 
     fn new_page(&mut self) -> Result<()> {
-        todo!()
+        let page = Page::new(0, self.page_size as usize);
+        page.write_struct(&mut self.backing)?;
+
+        self.active_page.replace(page);
+
+        Ok(())
     }
 }
 

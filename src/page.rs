@@ -108,7 +108,7 @@ impl Page {
 			seq: header.seq,
 			page_start: offset,
 			page_size: header.page_size as usize,
-			contents: if summary.is_some() { None } else { Some(Default::default()) },
+			contents: None,
 			trailer: summary,
 			created: header.created,
 		};
