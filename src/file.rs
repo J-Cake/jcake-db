@@ -19,7 +19,7 @@ use util::binary::{Binary, Fixed};
 
 pub struct BlockDriver<Backing: Device> {
     // path: PathBuf,
-    backing: Writer<Backing>,
+    pub(crate) backing: Writer<Backing>,
 
     uuid: Uuid,
     version: u32,
@@ -130,6 +130,18 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         Ok(())
     }
 
+    fn get_record(&self, record: &Location) -> Option<Object> {
+        let record = record.latest();
+        let page = self.load_page(record.0).ok()?;
+        page.get_object_at(record.1, self.backing.reader()).ok()?
+    }
+
+    fn get_record_header(&self, record: &Location) -> Option<ObjectHeader> {
+        let record = record.latest();
+        let page = self.load_page(record.0).ok()?;
+        page.get_object_header_at(record.1, self.backing.reader()).ok()?
+    }
+
     fn active_page_mut(&mut self) -> &mut Page {
         if let Some(ref mut page) = self.active_page && !page.is_sealed() {
             page.contents.get_or_insert_with(Default::default);
@@ -167,6 +179,24 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         self.active_page.replace(page);
 
         Ok(())
+    }
+
+    pub(crate) fn get_location(&self, uuid: Uuid) -> Option<&Location> {
+        self.index.and_then(|index| index.get(&uuid.as_u128()))
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item=ObjectHeader> {
+        gen {
+            if let Some(ref index) = self.index {
+                for record in index.values() {
+                    let Some(record) = self.get_record_header(record) else {
+                        continue;
+                    };
+
+                    yield record;
+                }
+            }
+        }
     }
 }
 
@@ -210,10 +240,11 @@ impl Hasher for FoldHasher {
 
 pub(crate) type PageNr = u64;
 pub(crate) type Offset = u32;
+
 struct Location(Vec<(PageNr, Offset)>);
 
 impl Location {
-    fn latest(&self) -> (PageNr, Offset) {
+    pub(crate) fn latest(&self) -> (PageNr, Offset) {
         self.0[self.0.len() - 1]
     }
 
@@ -226,7 +257,7 @@ impl Location {
     }
 }
 
-type Index = HashMap<u128, Location, BuildHasherDefault<FoldHasher>>;
+pub(crate) type Index = HashMap<u128, Location, BuildHasherDefault<FoldHasher>>;
 
 impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
     fn compact_db(&mut self) -> Result<()> {
@@ -235,7 +266,7 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
 
     fn entries(&self) -> impl Iterator<Item = Object> { ObjectIterator(self) }
 
-    fn search(&self, id: Uuid) -> Result<Option<Object>> {
+    fn fetch(&self, id: Uuid) -> Result<Option<Object>> {
         let Some(ref index) = self.index else {
             return Err(Error::new("Database is not indexed properly. Please re-open the database"));
         };

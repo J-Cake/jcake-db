@@ -3,6 +3,8 @@ use crate::Result;
 use format::binary;
 use std::convert::Infallible;
 use std::sync::Arc;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use util::binary::Fixed;
 use util::binary::u24;
 use util::Device;
@@ -16,6 +18,7 @@ pub(crate) enum ObjectKind {
 	Raw = 2,
 	Tombstone = 3,
 	Reference = 4,
+	Index = 5
 }
 
 impl TryFrom<u8> for ObjectKind {
@@ -87,6 +90,7 @@ impl ObjectHeader {
 			.ok_or(Error::new("Attempted to construct object from invalid header"))
 	}
 }
+
 impl Object {
 	pub(crate) fn len(&self) -> usize {
 		self.header.length
@@ -109,6 +113,12 @@ impl Object {
 		} else {
 			Ok(None)
 		}
+	}
+
+	pub fn try_into_parsed<Out: DeserializeOwned>(self) -> Result<Out> {
+		let json = jsonb::RawJsonb::new(&self);
+		jsonb::from_raw_jsonb(&json)
+			.map_err(|err| Error::new(format!("Failed to deserialise {err}")))
 	}
 }
 

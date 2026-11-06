@@ -1,9 +1,10 @@
 use crate::Error;
 use crate::Result;
 use crate::file::Offset;
-use crate::object::Object;
+use crate::object::{Object, ObjectKind};
 use crate::object::ObjectHeader;
 use std::collections::HashMap;
+use std::iter::Filter;
 use util::Device;
 use util::Reader;
 use util::Writer;
@@ -66,7 +67,8 @@ struct PageTrailer {
 }
 
 impl Page {
-	pub(crate) const FIRST_PAGE_OFFSET: u64 = 0x1_0000;
+	// pub(crate) const FIRST_PAGE_OFFSET: u64 = 0x1_0000;
+	pub(crate) const FIRST_PAGE_OFFSET: u64 = 0x400;
 	pub(crate) const ALIGNMENT: u64 = 0x10;
 
 	pub(crate) fn new(seq: u64, size: usize) -> Page {
@@ -195,6 +197,11 @@ impl Page {
 		let header = ObjectHeader::read(&mut dev)?;
 
 		Object::from_header(header, &mut dev)
+	}
+
+	pub(crate) fn get_object_header_at(&self, offset: Offset, mut dev: Reader<impl Device>) -> Result<Option<ObjectHeader>> {
+		dev.seek_to(self.page_start + offset as u64);
+		Ok(Some(ObjectHeader::read(&mut dev)?))
 	}
 
 	pub(crate) fn can_fit_object_of_length(&self, len: usize) -> bool {
