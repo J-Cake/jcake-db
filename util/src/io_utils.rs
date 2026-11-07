@@ -214,6 +214,10 @@ impl<'a, D: Device> Reader<'a, D> {
 	pub fn remaining(&self) -> u64 { self.end - self.pos }
 	pub fn seek_to(&mut self, to: u64) { self.pos = to.min(self.end); }
 	pub fn seek_by(&mut self, by: i64) { self.seek_to((self.pos as i64 + by) as u64); }
+	pub fn with_seek(mut self, seek: u64) -> Self {
+		self.seek_to(seek);
+		self
+	}
 
 	/// A sub-reader bounded to `[start, start + len)`, e.g. one page.
 	pub fn slice(&self, start: u64, len: u64) -> Self {

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use util::binary::Fixed;
 use util::Device;
-use crate::object::ObjectKind;
+use crate::object::{ObjectHeader, ObjectKind};
 use crate::{BlockDriver, TypedDatabase};
 use crate::file::Offset;
 use crate::page::{Page, PageHeader};
@@ -16,11 +16,11 @@ struct ContentIndex(Vec<IndexEntry>);
 enum IndexEntry {
     Add {
         data: Vec<String>,
-        uuid: Uuid
+        uuid: Uuid,
     },
     Remove {
         uuid: Uuid
-    }
+    },
 }
 
 impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
@@ -31,57 +31,129 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
         // UUID => content
         let mut backward_index = HashMap::<Uuid, Vec<String>>::new();
 
-        let mut last_index = None;
+        let obj = self.backing.iter();
+        let records = gen {
+            let mut last_index = None;
 
-        for record in self.backing.iter() {
-            if record.kind != ObjectKind::Index {
-                continue;
+            for record in obj {
+                if record.kind != ObjectKind::Index {
+                    continue;
+                }
+
+                last_index = Some(record.clone());
+
+                reader.seek_to(record.position);
+                let Ok(record) = record.into_object(&mut reader) else {
+                    continue;
+                };
+
+                let Ok(index) = record.try_into_parsed::<ContentIndex>() else {
+                    continue;
+                };
+
+                for entry in index.0 {
+                    yield entry;
+                }
             }
 
-            last_index = Some(record.clone());
+            let start_iterative = last_index
+                .and_then(|i| self.backing.get_location(i.uuid))
+                .map(|i| i.latest())
+                .unwrap_or((0, (PageHeader::SIZE as Offset).next_multiple_of(Page::ALIGNMENT as Offset)));
 
-            reader.seek_to(record.position);
-            let Ok(record) = record.into_object(&mut reader) else {
-                continue;
-            };
+            let mut page_nums = start_iterative.0..;
 
-            let Ok(index) = record.try_into_parsed::<ContentIndex>() else {
-                continue;
-            };
+            if let Some(Ok(first)) = page_nums.next().map(|i| self.backing.load_page(i)) {
+                let total_offset = start_iterative.1 as u64 + first.page_start;
+                let items = first.iter(self.backing.backing.reader());
 
-            for entry in index.0 {
-                let (IndexEntry::Add { uuid, .. } | IndexEntry::Remove { uuid }) = entry;
+                let mut page = vec![];
+                for i in items
+                    .skip_while(move |i| i.as_ref().is_ok_and(|i| i.position < total_offset))
+                    .filter_map(|i| i.ok()) {
 
-                if let Some(content) = backward_index.remove(&uuid) {
-                    for bucket in content {
-                        if let Some(forward) = forward_index.get_mut(&bucket) {
-                            *forward = forward.into_iter()
-                                .filter_map(|i| if *i == uuid { Some(*i) } else { None })
-                                .collect();
-                        }
+                    if let Some(record) = self.index_record(i) {
+                        page.push(record);
                     }
                 }
 
-                if let IndexEntry::Add { data, uuid } = entry {
-                    for content in &data {
-                        forward_index.entry(content.clone())
-                            .and_modify(|vec| vec.push(uuid))
-                            .or_insert(vec![uuid]);
-                    }
-
-                    backward_index.insert(uuid, data);
+                for record in page {
+                    yield record;
                 }
+            }
+
+            for page_nr in page_nums {
+                let Ok(page) = self.backing.load_page(page_nr) else {
+                    break;
+                };
+
+                let mut records = vec![];
+                for i in page.iter(self.backing.backing.reader())
+                    .filter_map(|i| i.ok()) {
+
+                    if let Some(record) = self.index_record(i) {
+                        records.push(record);
+                    }
+                }
+
+                for record in records {
+                    yield record;
+                }
+            }
+        };
+
+        for entry in records {
+            let (IndexEntry::Add { uuid, .. } | IndexEntry::Remove { uuid }) = entry;
+
+            if let Some(content) = backward_index.remove(&uuid) {
+                for bucket in content {
+                    if let Some(forward) = forward_index.get_mut(&bucket) {
+                        *forward = forward.into_iter()
+                            .filter_map(|i| if *i == uuid { Some(*i) } else { None })
+                            .collect();
+                    }
+                }
+            }
+
+            if let IndexEntry::Add { data, uuid } = entry {
+                for content in &data {
+                    forward_index.entry(content.clone())
+                        .and_modify(|vec| vec.push(uuid))
+                        .or_insert(vec![uuid]);
+                }
+
+                backward_index.insert(uuid, data);
             }
         }
 
-        let start_iterative = last_index
-            .and_then(|i| self.backing.get_location(i.uuid))
-            .map(|i| i.latest())
-            .unwrap_or((0, (PageHeader::SIZE as Offset).next_multiple_of(Page::ALIGNMENT as Offset)));
 
-        // TODO: iterate starting here.
 
         self.content_index = forward_index;
         self
+    }
+
+    fn index_record(&self, record: ObjectHeader) -> Option<IndexEntry> {
+        let mut reader = self.backing.backing
+            .reader()
+            .with_seek(record.position);
+
+        match record.kind {
+            ObjectKind::Tombstone => Some(IndexEntry::Remove { uuid: record.uuid }),
+            ObjectKind::Structured => {
+                let Ok(obj) = record.into_object(&mut reader) else {
+                    return None;
+                };
+
+                Some(IndexEntry::Add {
+                    uuid: record.uuid,
+                    data: (self.mapper)(&obj)
+                        .into_iter()
+                        .map(String::from_utf8)
+                        .filter_map(|i| i.ok())
+                        .collect(),
+                })
+            },
+            _ => None
+        }
     }
 }

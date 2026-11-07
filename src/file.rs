@@ -78,7 +78,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         Ok(driver)
     }
 
-    fn load_page(&self, page_number: PageNr) -> Result<Page> {
+    pub(crate) fn load_page(&self, page_number: PageNr) -> Result<Page> {
         // TODO: reuse parsed headers; they're not gonna change
         let mut reader = self.backing.reader();
         reader.seek_to(self.page_offset as u64 + page_number as u64 * self.page_size as u64);
@@ -182,7 +182,8 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
     }
 
     pub(crate) fn get_location(&self, uuid: Uuid) -> Option<&Location> {
-        self.index.and_then(|index| index.get(&uuid.as_u128()))
+        self.index.as_ref()
+            .and_then(|index| index.get(&uuid.as_u128()))
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item=ObjectHeader> {
@@ -241,7 +242,7 @@ impl Hasher for FoldHasher {
 pub(crate) type PageNr = u64;
 pub(crate) type Offset = u32;
 
-struct Location(Vec<(PageNr, Offset)>);
+pub(crate) struct Location(Vec<(PageNr, Offset)>);
 
 impl Location {
     pub(crate) fn latest(&self) -> (PageNr, Offset) {
