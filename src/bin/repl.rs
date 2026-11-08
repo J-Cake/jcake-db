@@ -25,7 +25,7 @@ items! {
 type Result<T, Error = db::Error> = core::result::Result<T, Error>;
 
 pub fn main() -> Result<()> {
-    let mut db = TypedDatabase::new("./fs.db")?
+    let db = TypedDatabase::new("./fs.db")?
         .with_mapper::<Item>(|obj| match obj {
             Item::Message(msg) => keys![msg.created, msg.from, msg.to],
             Item::User(user) => keys![user.name, user.email, user.oidc_uuid]

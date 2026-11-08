@@ -42,7 +42,7 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
 
                 last_index = Some(record.clone());
 
-                reader.seek_to(record.position);
+                reader.seek_to(record.position + ObjectHeader::SIZE as u64);
                 let Ok(record) = record.into_object(&mut reader) else {
                     continue;
                 };
@@ -77,6 +77,7 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
                     }
                 }
 
+                // We unfortunately need to store a page's worth of values here because you can't yield a generator while borrowing an owned value.
                 for record in page {
                     yield record;
                 }
@@ -96,6 +97,7 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
                     }
                 }
 
+                // same borrowing point here.
                 for record in records {
                     yield record;
                 }
@@ -108,9 +110,7 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
             if let Some(content) = backward_index.remove(&uuid) {
                 for bucket in content {
                     if let Some(forward) = forward_index.get_mut(&bucket) {
-                        *forward = forward.into_iter()
-                            .filter_map(|i| if *i == uuid { Some(*i) } else { None })
-                            .collect();
+                        forward.retain(|i| *i != uuid)
                     }
                 }
             }
@@ -118,15 +118,22 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
             if let IndexEntry::Add { data, uuid } = entry {
                 for content in &data {
                     forward_index.entry(content.clone())
-                        .and_modify(|vec| vec.push(uuid))
-                        .or_insert(vec![uuid]);
+                        .and_modify(|vec| {
+                            vec.push(uuid);
+                            vec.sort();
+                            vec.dedup();
+                        })
+                        .or_insert_with(|| {
+                            let mut v = vec![uuid];
+                            v.sort();
+                            v.dedup();
+                            v
+                        });
                 }
 
                 backward_index.insert(uuid, data);
             }
         }
-
-
 
         self.content_index = forward_index;
         self

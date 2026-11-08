@@ -30,6 +30,7 @@ impl TryFrom<u8> for ObjectKind {
 			2 => Self::Raw,
 			3 => Self::Tombstone,
 			4 => Self::Reference,
+			5 => Self::Index,
 			other => return Err(Error::new(format!("Invalid object type marker {:#2x}", other))),
 		})
 	}

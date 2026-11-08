@@ -98,7 +98,7 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
                 .collect()
         });
 
-        self
+        self.into_indexed()
     }
 }
 
@@ -109,13 +109,13 @@ impl TypedDatabase<BlockDriver<fs::File>> {
                 backing: open(path)?,
                 mapper: no_index(),
                 content_index: HashMap::new(),
-            }.into_indexed())
+            })
         } else {
             Ok(Self {
                 backing: blank(path)?,
                 mapper: no_index(),
                 content_index: HashMap::new(),
-            }.into_indexed())
+            })
         }
     }
 }
