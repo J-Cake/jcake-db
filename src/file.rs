@@ -223,7 +223,7 @@ pub fn blank(path: impl AsRef<Path>) -> Result<BlockDriver<fs::File>> {
 }
 
 #[derive(Default)]
-struct FoldHasher(u64);
+pub(crate) struct FoldHasher(u64);
 
 impl Hasher for FoldHasher {
     fn finish(&self) -> u64 {

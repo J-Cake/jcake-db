@@ -115,20 +115,14 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
                 }
             }
 
-            if let IndexEntry::Add { data, uuid } = entry {
+            if let IndexEntry::Add { mut data, uuid } = entry {
+                data.sort_unstable();
+                data.dedup();
+
                 for content in &data {
                     forward_index.entry(content.clone())
-                        .and_modify(|vec| {
-                            vec.push(uuid);
-                            vec.sort();
-                            vec.dedup();
-                        })
-                        .or_insert_with(|| {
-                            let mut v = vec![uuid];
-                            v.sort();
-                            v.dedup();
-                            v
-                        });
+                        .or_default()
+                        .push(uuid);
                 }
 
                 backward_index.insert(uuid, data);
@@ -142,7 +136,7 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
     fn index_record(&self, record: ObjectHeader) -> Option<IndexEntry> {
         let mut reader = self.backing.backing
             .reader()
-            .with_seek(record.position);
+            .with_seek(record.position + ObjectHeader::SIZE as u64);
 
         match record.kind {
             ObjectKind::Tombstone => Some(IndexEntry::Remove { uuid: record.uuid }),
