@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use util::binary::Fixed;
 use util::Device;
+use util::traits::ToBytes;
 use crate::object::{ObjectHeader, ObjectKind};
 use crate::{BlockDriver, TypedDatabase};
 use crate::file::Offset;
@@ -15,7 +16,7 @@ struct ContentIndex(Vec<IndexEntry>);
 #[serde(untagged)]
 enum IndexEntry {
     Add {
-        data: Vec<String>,
+        data: Vec<Box<[u8]>>,
         uuid: Uuid,
     },
     Remove {
@@ -23,13 +24,15 @@ enum IndexEntry {
     },
 }
 
+type Bytes = Box<[u8]>;
+
 impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
     pub(crate) fn into_indexed(mut self) -> Self {
         let mut reader = self.backing.backing.reader();
         // content => UUID
-        let mut forward_index = HashMap::<String, Vec<Uuid>>::new();
+        let mut forward_index = HashMap::<Bytes, Vec<Uuid>>::new();
         // UUID => content
-        let mut backward_index = HashMap::<Uuid, Vec<String>>::new();
+        let mut backward_index = HashMap::<Uuid, Vec<Bytes>>::new();
 
         let obj = self.backing.iter();
         let records = gen {
@@ -149,8 +152,6 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
                     uuid: record.uuid,
                     data: (self.mapper)(&obj)
                         .into_iter()
-                        .map(String::from_utf8)
-                        .filter_map(|i| i.ok())
                         .collect(),
                 })
             },

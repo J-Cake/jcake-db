@@ -1,4 +1,3 @@
-#![feature(map_try_insert)]
 #![feature(gen_blocks)]
 extern crate core;
 
@@ -9,13 +8,9 @@ mod content_index;
 
 use std::collections::HashMap;
 use std::fs;
-use std::fs::read;
-use std::hash::{Hash, Hasher};
-use std::io::Bytes;
 use std::path::Path;
 use serde::Serialize;
-use serde::de::{DeserializeOwned, DeserializeSeed};
-use serde_json::json;
+use serde::de::DeserializeOwned;
 use uuid::Uuid;
 pub use file::BlockDriver;
 pub use util::Device;
@@ -23,9 +18,10 @@ pub use util::Error;
 pub use util::Reader;
 pub use util::Writer;
 pub use util::Result;
+pub use util::traits::ToBytes;
 use crate::file::blank;
 use crate::file::open;
-use crate::object::{Object, ObjectKind};
+use crate::object::Object;
 
 pub trait ObjectStore: Sized {
     fn compact_db(&mut self) -> Result<()>;
@@ -39,8 +35,8 @@ pub trait ObjectStore: Sized {
 
 pub struct TypedDatabase<Db: ObjectStore> {
     backing: Db,
-    mapper: Box<dyn Fn(&[u8]) -> Vec<Vec<u8>>>,
-    content_index: HashMap<String, Vec<Uuid>>
+    mapper: Box<dyn Fn(&[u8]) -> Vec<Box<[u8]>>>,
+    content_index: HashMap<Box<[u8]>, Vec<Uuid>>
 }
 
 impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
@@ -65,8 +61,8 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
         Ok(Some(obj))
     }
 
-    pub fn query<T: DeserializeOwned>(&self, search: impl AsRef<str>) -> Result<Vec<T>> {
-        let Some(matches) = self.content_index.get(search.as_ref()) else {
+    pub fn query<T: DeserializeOwned>(&self, search: impl ToBytes) -> Result<Vec<T>> {
+        let Some(matches) = self.content_index.get(&search.to_bytes()) else {
             return Ok(vec![]);
         };
 
@@ -80,7 +76,7 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
         self.backing.delete(uuid)
     }
 
-    pub fn with_mapper<Type: Serialize + DeserializeOwned>(mut self, mapper: impl Fn(&Type) -> Vec<&dyn ToString> + 'static) -> Self {
+    pub fn with_mapper<Type: Serialize + DeserializeOwned>(mut self, mapper: impl Fn(&Type) -> Vec<&dyn ToBytes> + 'static) -> Self {
         self.mapper = Box::new(move |obj| {
             let obj = jsonb::RawJsonb::new(obj);
             let obj = match jsonb::from_raw_jsonb(&obj) {
@@ -93,8 +89,7 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
             let res = mapper(&obj);
 
             res.into_iter()
-                .map(ToString::to_string)
-                .map(String::into_bytes)
+                .map(ToBytes::to_bytes)
                 .collect()
         });
 
@@ -120,7 +115,7 @@ impl TypedDatabase<BlockDriver<fs::File>> {
     }
 }
 
-fn no_index() -> Box<dyn Fn(&[u8]) -> Vec<Vec<u8>>> {
+fn no_index() -> Box<dyn Fn(&[u8]) -> Vec<Box<[u8]>>> {
     Box::new(move |_| vec![])
 }
 
@@ -131,6 +126,12 @@ macro_rules! items {
             #[derive(Debug, Serialize, Deserialize)]
             $(#[$meta])*
             pub struct $name { $($body)* }
+
+            impl $name {
+                pub fn into_item(self) -> Item {
+                    Item::$name(self)
+                }
+            }
         )*
 
         #[derive(Debug, Serialize, Deserialize)]
@@ -144,6 +145,6 @@ macro_rules! items {
 #[macro_export]
 macro_rules! keys {
     ($($e:expr),* $(,)?) => {
-        vec![$( &$e as &dyn ::std::string::ToString ),*]
+        vec![$( &$e as &dyn ::db::ToBytes ),*]
     };
 }

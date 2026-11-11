@@ -5,6 +5,6 @@ edition = "2024"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
-jsonb = "0.5.6"
+jsonb = { git = "https://github.com/J-Cake/jsonb", branch = "fix-todo-items" }
 chrono = "0.4.45"
 uuid = { version = "1.29.0", features = ["v4"] }

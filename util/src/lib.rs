@@ -2,6 +2,8 @@ pub mod error;
 pub mod crc;
 pub mod io_utils;
 pub mod binary;
+pub mod traits;
+
 pub use error::*;
 pub use crc::*;
 pub use io_utils::*;
