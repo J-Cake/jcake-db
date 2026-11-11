@@ -173,10 +173,16 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
     }
 
     fn new_page(&mut self) -> Result<()> {
-        let page = Page::new(0, self.page_size as usize);
+        let page_nr = self.active_page
+            .as_ref()
+            .map(|i| i.seq + 1)
+            .unwrap_or(0);
+        let page = Page::new(page_nr, self.page_size as usize);
         page.write_struct(&mut self.backing)?;
 
         self.active_page.replace(page);
+
+        // TODO: dump the content index for the previous page
 
         Ok(())
     }

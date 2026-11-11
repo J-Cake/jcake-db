@@ -255,7 +255,7 @@ async fn open_db(args: &Args) -> io::Result<DbHandle> {
 					},
 					RequestIntention::Insert(obj) => {
 						let res = db.insert(obj);
-						req.res.send(res.map(|uuid| json! {{ "uuid": uuid }}))
+						req.res.send(res.map(|uuid| json!(uuid)))
 					}
 					RequestIntention::Upsert(uuid, obj) => {
 						let res = db.upsert(uuid, obj);

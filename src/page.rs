@@ -68,7 +68,7 @@ struct PageTrailer {
 
 impl Page {
 	// pub(crate) const FIRST_PAGE_OFFSET: u64 = 0x1_0000;
-	pub(crate) const FIRST_PAGE_OFFSET: u64 = 0x400;
+	pub(crate) const FIRST_PAGE_OFFSET: u64 = 0x50;
 	pub(crate) const ALIGNMENT: u64 = 0x10;
 
 	pub(crate) fn new(seq: u64, size: usize) -> Page {

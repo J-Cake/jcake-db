@@ -38,7 +38,6 @@ pub struct TypedDatabase<Db: ObjectStore> {
     backing: Db,
     mapper: Box<dyn Fn(&[u8]) -> Vec<Box<[u8]>>>,
     content_index: ContentIndexCx
-    // content_index: HashMap<Box<[u8]>, Vec<Uuid>>
 }
 
 impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
@@ -71,10 +70,6 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
     }
 
     pub fn query<T: DeserializeOwned>(&self, search: impl ToBytes) -> Result<Vec<T>> {
-        let _ct = self.content_index.iter()
-            .map(|(key, value)| (String::from_utf8_lossy(key), value))
-            .collect::<std::collections::HashMap<_, _>>();
-
         let Some(matches) = self.content_index.get(&search.to_bytes()) else {
             return Ok(vec![]);
         };
