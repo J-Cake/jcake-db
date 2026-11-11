@@ -25,10 +25,10 @@ items! {
 type Result<T, Error = db::Error> = core::result::Result<T, Error>;
 
 pub fn main() -> Result<()> {
-    let mut db = TypedDatabase::new("./fs.db")?
+    let mut db = TypedDatabase::new("./test/fs.db")?
         .with_mapper::<Item>(|obj| match obj {
             Item::Message(msg) => keys![msg.created, msg.from, msg.to],
-            Item::User(user) => keys![user.name, user.email, user.oidc_uuid]
+            Item::User(user) => keys![user.name.to_lowercase(), user.email.to_lowercase(), user.oidc_uuid]
         });
 
     let obj = db.insert(User {
@@ -38,7 +38,7 @@ pub fn main() -> Result<()> {
         oidc_uuid: Default::default(),
     }.into_item())?;
 
-    db.delete(obj)?;
+    // db.delete(obj)?;
 
     let res = db.query::<Item>("JCake")?;
 

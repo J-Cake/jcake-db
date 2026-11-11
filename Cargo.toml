@@ -9,17 +9,29 @@ members = ["format", "util"]
 [dependencies]
 jsonb = { git = "https://github.com/J-Cake/jsonb", branch = "fix-todo-items" }
 serde = { version = "1.0.229" }
-serde_json = "1.0.151"
 uuid = { version = "1.29.0", features = ["v4", "serde"] }
-clap = { version = "4.6.7", optional = true }
 chrono = { version = "0.4.45", features = ["serde"] }
 util = { path = "./util" }
 format = { path = "./format" }
 
+clap = { version = "4.6.7", features = ["derive", "env"], optional = true }
+serde_json = { version = "1.0.151", optional = true }
+axum = { version = "0.8.9", optional = true }
+tokio = { version = "1.54.1", optional = true, features = ["full"] }
+jaq-core = { version = "3.1.2", optional = true }
+jaq-json = { version = "2.0.3", optional = true, features = ["serde"] }
+jaq-std = { version = "3.0.4", optional = true }
+
 [features]
 debug = ["clap"]
+web = ["clap/derive", "clap/env", "axum/macros", "tokio/full", "serde_json", "chrono/now", "chrono/serde", "jaq-core", "jaq-json/serde", "jaq-std"]
 
 [[bin]]
 name = "repl"
 path = "src/bin/repl.rs"
 required-features = ["debug"]
+
+[[bin]]
+name = "web"
+path = "src/bin/web.rs"
+required-features = ["web"]

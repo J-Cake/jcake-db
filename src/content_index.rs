@@ -9,6 +9,54 @@ use crate::{BlockDriver, TypedDatabase};
 use crate::file::Offset;
 use crate::page::{Page, PageHeader};
 
+#[derive(Default, Debug)]
+pub(crate) struct ContentIndexCx {
+    forward: HashMap<Bytes, Vec<Uuid>>,
+    backward: HashMap<Uuid, Vec<Bytes>>
+}
+
+impl ContentIndexCx {
+    pub(crate) fn add(&mut self, uuid: Uuid, mut keys: Vec<Bytes>) {
+        self.del(uuid);
+
+        keys.sort_unstable();
+        keys.dedup();
+
+        for content in &keys {
+            self.forward.entry(content.clone())
+                .or_default()
+                .push(uuid);
+        }
+
+        self.backward.insert(uuid, keys);
+    }
+
+    pub(crate) fn del(&mut self, uuid: Uuid) {
+        if let Some(content) = self.backward.remove(&uuid) {
+            for bucket in content {
+                if let Some(forward) = self.forward.get_mut(&bucket) {
+                    forward.retain(|i| *i != uuid)
+                }
+            }
+        }
+    }
+
+    fn apply(&mut self, entry: IndexEntry) {
+        match entry {
+            IndexEntry::Add { uuid, data } => self.add(uuid, data),
+            IndexEntry::Remove { uuid } => self.del(uuid),
+        }
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item=(&Bytes, &Vec<Uuid>)> {
+        self.forward.iter()
+    }
+
+    pub(crate) fn get(&self, key: &[u8]) -> Option<&Vec<Uuid>> {
+        self.forward.get(key)
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ContentIndex(Vec<IndexEntry>);
 
@@ -29,10 +77,6 @@ type Bytes = Box<[u8]>;
 impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
     pub(crate) fn into_indexed(mut self) -> Self {
         let mut reader = self.backing.backing.reader();
-        // content => UUID
-        let mut forward_index = HashMap::<Bytes, Vec<Uuid>>::new();
-        // UUID => content
-        let mut backward_index = HashMap::<Uuid, Vec<Bytes>>::new();
 
         let obj = self.backing.iter();
         let records = gen {
@@ -107,32 +151,12 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
             }
         };
 
+        let mut index = ContentIndexCx::default();
         for entry in records {
-            let (IndexEntry::Add { uuid, .. } | IndexEntry::Remove { uuid }) = entry;
-
-            if let Some(content) = backward_index.remove(&uuid) {
-                for bucket in content {
-                    if let Some(forward) = forward_index.get_mut(&bucket) {
-                        forward.retain(|i| *i != uuid)
-                    }
-                }
-            }
-
-            if let IndexEntry::Add { mut data, uuid } = entry {
-                data.sort_unstable();
-                data.dedup();
-
-                for content in &data {
-                    forward_index.entry(content.clone())
-                        .or_default()
-                        .push(uuid);
-                }
-
-                backward_index.insert(uuid, data);
-            }
+            index.apply(entry);
         }
 
-        self.content_index = forward_index;
+        self.content_index = index;
         self
     }
 
