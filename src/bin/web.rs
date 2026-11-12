@@ -7,7 +7,9 @@ use std::str::FromStr;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use axum::middleware::Next;
 use axum::response::IntoResponse;
+use chrono::Local;
 use clap::Parser;
 use jaq_core::{unwrap_valr, Compiler, Ctx, Vars, data};
 use jaq_core::load::{Arena, File, Loader};
@@ -34,7 +36,7 @@ struct Args {
 	extractor: String
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum Bind {
 	Socket(SocketAddr),
 	Path(PathBuf)
@@ -74,6 +76,10 @@ mod method {
 	}
 }
 
+fn now() -> String {
+	Local::now().format("%Y-%m-%d %H-%M-%S").to_string()
+}
+
 #[tokio::main]
 pub async fn main() -> io::Result<()> {
 	let args = Args::parse();
@@ -92,7 +98,27 @@ pub async fn main() -> io::Result<()> {
 			"healthy": true,
 			"received": chrono::Utc::now()
 		}})))
-		.with_state(db);
+		.with_state(db)
+		.layer(axum::middleware::from_fn(async |req: axum::extract::Request, next: Next| {
+			let method = req.method()
+				.clone()
+				.to_string()
+				.to_uppercase();
+			let path = req.uri()
+				.clone()
+				.path()
+				.to_string();
+			let res = next.run(req).await;
+			let status = res.status()
+				.as_str()
+				.to_uppercase();
+
+			println!("[{now}] {status} {method} {path}", now=now());
+
+			res
+		}));
+
+	println!("[{now}]: Starting webservice on {socket:?}", now=now(), socket=&args.bind);
 
 	match &args.bind {
 		Bind::Path(path) => {

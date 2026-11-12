@@ -21,6 +21,7 @@ tokio = { version = "1.54.1", optional = true, features = ["full"] }
 jaq-core = { version = "3.1.2", optional = true }
 jaq-json = { version = "2.0.3", optional = true, features = ["serde"] }
 jaq-std = { version = "3.0.4", optional = true }
+axum-core = "0.5.6"
 
 [features]
 debug = ["clap"]

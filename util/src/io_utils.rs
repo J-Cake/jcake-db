@@ -27,7 +27,7 @@ impl Device for File {
 	fn read_at(&self, offset: u64, len: usize) -> Result<Box<[u8]>> {
 		let mut buf = vec![0u8; len].into_boxed_slice();
 		if let Err(err) = sys::read_exact_at(self, &mut buf, offset) && err.kind() == ErrorKind::UnexpectedEof {
-			return Err(Error::recoverable("EOF"));
+			return Err(Error::eof());
 		};
 
 		Ok(buf)
@@ -50,7 +50,7 @@ impl Device for Vec<u8> {
 		let src = usize::try_from(offset)
 			.ok()
 			.and_then(|s| self.get(s..s.checked_add(len)?))
-			.ok_or(Error::recoverable("EOF"))?;
+			.ok_or(Error::eof())?;
 
 		Ok(src.to_vec().into_boxed_slice())
 	}
@@ -202,7 +202,7 @@ impl<'a, D: Device> Reader<'a, D> {
 	}
 	pub fn read(&mut self, len: usize) -> Result<Box<[u8]>> {
 		if self.pos + len as u64 > self.end {
-			return Err(Error::recoverable("EOF"));
+			return Err(Error::eof());
 		}
 
 		let buf = self.dev.read_at(self.pos, len)?;

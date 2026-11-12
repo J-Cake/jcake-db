@@ -503,7 +503,7 @@ fn expand(
                         #capture_ptr
                         let __all = #rt::read_window(__dev)?;
                         if __all.len() < #prefix_end {
-                            return ::core::result::Result::Err(#rt::Error::recoverable("EOF"));
+                            return ::core::result::Result::Err(#rt::Error::eof());
                         }
                         let (__buf, __tail) = __all.split_at(#prefix_end);
                         #parse_prefix

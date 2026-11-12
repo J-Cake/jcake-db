@@ -2,14 +2,14 @@ use std::fmt::Formatter;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Error {
-    msg: String,
-    recoverable: bool,
+pub enum Error {
+    Misc(String),
+    EOF,
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.msg, f)
+        std::fmt::Debug::fmt(&self, f)
     }
 }
 
@@ -17,21 +17,15 @@ impl std::error::Error for Error {}
 
 impl Error {
     pub fn new(msg: impl AsRef<str>) -> Self {
-        Self {
-            msg: msg.as_ref().to_string(),
-            recoverable: false
-        }
+        Self::Misc(msg.as_ref().to_string())
     }
 
-    pub fn recoverable(msg: impl AsRef<str>) -> Self {
-        Self {
-            msg: msg.as_ref().to_string(),
-            recoverable: true
-        }
+    pub fn eof() -> Self {
+        Self::EOF
     }
 
-    pub fn is_recoverable(&self) -> bool {
-        self.recoverable
+    pub fn is_eof(&self) -> bool {
+        matches!(self, Self::EOF)
     }
 }
 

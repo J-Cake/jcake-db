@@ -131,7 +131,11 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         let mut max_page = 0 as PageNr;
         for page_nr in 0 as PageNr.. {
             let reader = self.backing.reader();
-            let page = self.load_page(page_nr)?;
+            let page = match self.load_page(page_nr) {
+                Ok(page) => page,
+                Err(Error::EOF) => break,
+                Err(err) => return Err(err),
+            };
 
             // TODO: figure out a way to handle pages properly.
 
@@ -191,7 +195,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
             reader.seek_to(self.page_offset as u64 + page_nr as u64 * self.page_size as u64);
             match PageHeader::read(&mut reader) {
                 Ok(_) => continue,
-                Err(err) if err.is_recoverable() => return Ok(page_nr as usize),
+                Err(err) if err.is_eof() => return Ok(page_nr as usize),
                 Err(err) => return Err(err)
             }
         }

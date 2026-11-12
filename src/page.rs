@@ -148,7 +148,7 @@ impl Page {
 				created: self.created,
 			}.write(dev)?;
 		} else {
-			return Err(Error::recoverable("Attempted to write a sealed a page"))
+			return Err(Error::new("Attempted to write a sealed a page"))
 		}
 
 		Ok(())
@@ -320,7 +320,7 @@ impl<'a, Dev: Device> Iterator for PageIter<'a, Dev> {
 						}
 						Some(Ok(header))
 					}
-					Err(e) if e.is_recoverable() => None,
+					Err(e) if e.is_eof() => None,
 					Err(e) => {
 						self.did_return_error = true;
 						Some(Err(e))
