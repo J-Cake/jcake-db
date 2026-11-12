@@ -1,4 +1,7 @@
 #![feature(gen_blocks)]
+#![feature(try_entry)]
+#![feature(nonpoison_rwlock)]
+#![feature(sync_nonpoison)]
 extern crate core;
 
 mod file;

@@ -6,16 +6,35 @@ use crate::object::ObjectHeader;
 use crate::object::ObjectKind;
 use crate::page::{Page, PageHeader};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fs;
 use std::fs::OpenOptions;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::nonpoison::RwLock;
 use util::Device;
 use util::Writer;
 use uuid::Uuid;
 use format::binary;
 use util::binary::{Binary, Fixed};
+
+pub(crate) enum LoadedPage {
+    Sealed(Arc<Page>),
+    Open(Page)
+}
+
+impl std::ops::Deref for LoadedPage {
+    type Target = Page;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            LoadedPage::Sealed(page) => page.as_ref(),
+            LoadedPage::Open(page) => page
+        }
+    }
+}
 
 pub struct BlockDriver<Backing: Device> {
     // path: PathBuf,
@@ -28,6 +47,9 @@ pub struct BlockDriver<Backing: Device> {
 
     index: Option<Index>,
     active_page: Option<Page>,
+
+    // TODO: purge LRU-style old data.
+    page_headers_cache: RwLock<HashMap<PageNr, Arc<Page>>>
 }
 
 impl<BlockDev: Device> BlockDriver<BlockDev> {
@@ -45,6 +67,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
             page_offset: superblock.page_offset,
             index: None,
             active_page: None,
+            page_headers_cache: RwLock::new(HashMap::new())
         };
 
         driver.index()?;
@@ -63,6 +86,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
             active_page: None,
 
             index: Some(Index::with_hasher(BuildHasherDefault::new())),
+            page_headers_cache: RwLock::new(HashMap::new())
         };
 
         let superblock = Superblock {
@@ -78,10 +102,27 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         Ok(driver)
     }
 
-    pub(crate) fn load_page(&self, page_number: PageNr) -> Result<Page> {
-        // TODO: reuse parsed headers; they're not gonna change
+    pub(crate) fn load_page(&self, page_nr: PageNr) -> Result<LoadedPage> {
+        if let Some(page) = self.page_headers_cache.read().get(&page_nr) {
+            return Ok(LoadedPage::Sealed(page.clone()));
+        }
+
+        let mut page = self.load_page_from_disk(page_nr)?;
+
+        if page.is_sealed() {
+            let page = Arc::new(page);
+            self.page_headers_cache.write().insert(page_nr, page.clone());
+
+            return Ok(LoadedPage::Sealed(page.clone()))
+        }
+
+        page.preload_records(self.backing.reader())?;
+        Ok(LoadedPage::Open(page))
+    }
+
+    fn load_page_from_disk(&self, page_nr: PageNr) -> Result<Page> {
         let mut reader = self.backing.reader();
-        reader.seek_to(self.page_offset as u64 + page_number as u64 * self.page_size as u64);
+        reader.seek_to(self.page_offset as u64 + page_nr as u64 * self.page_size as u64);
         Ok(Page::read_struct(&mut reader)?)
     }
 
@@ -89,22 +130,21 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         let mut records = 0usize;
         let mut max_page = 0 as PageNr;
         for page_nr in 0 as PageNr.. {
-            let mut page = self.load_page(page_nr)?;
+            let reader = self.backing.reader();
+            let page = self.load_page(page_nr)?;
 
-            records += page.count_records(self.backing.reader());
+            // TODO: figure out a way to handle pages properly.
+
+            records += page.count_records(reader);
             max_page = page_nr;
-
-            if !page.is_sealed() {
-                page.preload_records(self.backing.reader())?;
-                self.active_page.replace(page);
-                break;
-            }
         }
 
         let mut index = Index::with_capacity_and_hasher(records, BuildHasherDefault::new());
 
         for page_nr in 0..=max_page {
-            let page = self.load_page(page_nr)?;
+            let Ok(page) = self.load_page(page_nr) else {
+                break;
+            };
 
             for record in page.iter(self.backing.reader()) {
                 let Ok(record) = record else {
@@ -130,61 +170,80 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         Ok(())
     }
 
-    fn get_record(&self, record: &Location) -> Option<Object> {
+    fn get_record(&self, record: &Location) -> Result<Option<Object>> {
         let record = record.latest();
-        let page = self.load_page(record.0).ok()?;
-        page.get_object_at(record.1, self.backing.reader()).ok()?
+        let page = self.load_page(record.0)?;
+        Ok(page.get_object_at(record.1, self.backing.reader())?)
     }
 
-    fn get_record_header(&self, record: &Location) -> Option<ObjectHeader> {
+    fn get_record_header(&self, record: &Location) -> Result<Option<ObjectHeader>> {
         let record = record.latest();
-        let page = self.load_page(record.0).ok()?;
-        page.get_object_header_at(record.1, self.backing.reader()).ok()?
+        let page = self.load_page(record.0)?;
+        Ok(page.get_object_header_at(record.1, self.backing.reader())?)
     }
 
-    fn active_page_mut(&mut self) -> &mut Page {
-        if let Some(ref mut page) = self.active_page && !page.is_sealed() {
-            page.contents.get_or_insert_with(Default::default);
-            return page;
-        }
+    fn page_count(&self) -> Result<usize> {
+        let max = self.get_last_known_page_nr();
 
-        if let Some(page_nr) = self.index.as_ref()
-            .and_then(|index| index.values().map(|i| i.latest().0).max()) &&
-            let Ok(page) = self.load_page(page_nr) {
+        let mut reader = self.backing.reader();
 
-            if !page.is_sealed() {
-                self.active_page.replace(page);
+        for page_nr in max.. {
+            reader.seek_to(self.page_offset as u64 + page_nr as u64 * self.page_size as u64);
+            match PageHeader::read(&mut reader) {
+                Ok(_) => continue,
+                Err(err) if err.is_recoverable() => return Ok(page_nr as usize),
+                Err(err) => return Err(err)
             }
         }
 
-        if let Some(ref mut page) = self.active_page && !page.is_sealed() {
-            page.contents.get_or_insert_with(Default::default);
-            return page;
-        }
-
-        self.index().expect("Failed to index database");
-
-        if let Some(ref mut page) = self.active_page && !page.is_sealed() {
-            page.contents.get_or_insert_with(Default::default);
-            return page;
-        }
-
-        panic!("Retrieving the active page failed. Something's truly broken.");
+        unreachable!()
     }
 
-    fn new_page(&mut self) -> Result<()> {
-        let page_nr = self.active_page
+    fn get_last_known_page_nr(&self) -> PageNr {
+        self.index
             .as_ref()
-            .map(|i| i.seq + 1)
-            .unwrap_or(0);
-        let page = Page::new(page_nr, self.page_size as usize);
+            .and_then(|index| index.values().map(|i| i.latest().0).max())
+            .unwrap_or(0)
+    }
+
+    fn active_page_mut(&mut self) -> Result<&mut Page> {
+        let have_active = self.active_page.as_ref()
+            .is_some_and(|p| !p.is_sealed());
+
+        if !have_active {
+            let start = self.get_last_known_page_nr();
+
+            for page_nr in start..self.page_count()? as PageNr {
+                match self.load_page(page_nr)? {
+                    LoadedPage::Sealed(_) => continue,
+                    LoadedPage::Open(page) => {
+                        self.active_page.replace(page);
+                        return Ok(self.active_page.as_mut().expect("Set above"));
+                    }
+                }
+            }
+
+            return Ok(self.new_page()?)
+        }
+
+        return Ok(self.active_page.as_mut().expect("Set above"))
+    }
+
+    fn new_page(&mut self) -> Result<&mut Page> {
+        let page_nr = if let Some(ref mut page) = self.active_page {
+            page.seal(&mut self.backing)?;
+            page.seq + 1
+        } else { 0 };
+
+        let mut page = Page::new(page_nr, self.page_size as usize);
+        page.contents.replace(Default::default());
         page.write_struct(&mut self.backing)?;
 
         self.active_page.replace(page);
 
         // TODO: dump the content index for the previous page
 
-        Ok(())
+        Ok(self.active_page.as_mut().expect("Infallible"))
     }
 
     pub(crate) fn get_location(&self, uuid: Uuid) -> Option<&Location> {
@@ -196,7 +255,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         gen {
             if let Some(ref index) = self.index {
                 for record in index.values() {
-                    let Some(record) = self.get_record_header(record) else {
+                    let Ok(Some(record)) = self.get_record_header(record) else {
                         continue;
                     };
 
@@ -283,6 +342,7 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         };
 
         let page = self.load_page(location.latest().0)?;
+
         page.get_object_at(location.latest().1 as u32, self.backing.reader())
     }
 
@@ -295,12 +355,16 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
     }
 
     fn upsert(&mut self, uuid: Uuid, data: &[u8]) -> Result<()> {
+        if data.len() as u64 > Page::MAX_OBJECT_PAYLOAD {
+            return Err(Error::new("Object payload is too large."));
+        }
+
         // 1. Check whether the current page has enough space on it
         // 2. Allocate a new page if necessary and write it into `self`
         // 3. Take the latest page and write the object there.
         // 4. Update the page to include the object in the index
 
-        if !self.active_page_mut().can_fit_object_of_length(data.len()) {
+        if !self.active_page_mut()?.can_fit_object_of_length(data.len()) {
             self.new_page()?;
         }
 
@@ -316,13 +380,13 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
             .unwrap_or(PageHeader::SIZE as Offset)
             .next_multiple_of(Page::ALIGNMENT as u32);
 
-        let seek = self.active_page_mut().page_start + page_offset as u64;
+        let seek = self.active_page_mut()?.page_start + page_offset as u64;
 
         let obj = ObjectHeader {
             uuid,
             length: data.len(),
             kind: ObjectKind::Structured,
-            crc: crc.into_u32(),
+            data_crc: crc.into_u32(),
             position: seek,
         };
 
@@ -330,14 +394,14 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         obj.write(&mut self.backing)?;
         self.backing.append(data)?;
 
-        self.active_page_mut()
+        self.active_page_mut()?
             .contents
             .get_or_insert(vec![])
             .push(obj);
 
         self.backing.sync()?;
 
-        let page = self.active_page_mut().seq;
+        let page = self.active_page_mut()?.seq;
         self.index
             .get_or_insert_with(|| Default::default())
             .insert(uuid.as_u128(), Location::new(page, page_offset));
@@ -346,7 +410,7 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
     }
 
     fn delete(&mut self, uuid: Uuid) -> Result<()> {
-        if !self.active_page_mut().can_fit_object_of_length(0) {
+        if !self.active_page_mut()?.can_fit_object_of_length(0) {
             self.new_page()?;
         }
 
@@ -361,20 +425,20 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
             .unwrap_or(PageHeader::SIZE as Offset)
             .next_multiple_of(Page::ALIGNMENT as u32);
 
-        let seek = self.active_page_mut().page_start + page_offset as u64;
+        let seek = self.active_page_mut()?.page_start + page_offset as u64;
 
         let obj = ObjectHeader {
             uuid,
             length: 0,
             kind: ObjectKind::Tombstone,
-            crc: crc.into_u32(),
+            data_crc: crc.into_u32(),
             position: seek,
         };
 
         self.backing.try_seek_to(seek)?;
         obj.write(&mut self.backing)?;
 
-        self.active_page_mut()
+        self.active_page_mut()?
             .contents
             .get_or_insert(vec![])
             .push(obj);

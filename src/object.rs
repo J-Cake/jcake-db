@@ -61,7 +61,7 @@ pub struct Object {
 	pub(crate) data: ObjectData
 }
 
-#[binary(Uuid(uuid), u24(len), u8(kind), u32(crc), ptr(offset))]
+#[binary(Uuid(uuid), u24(len), u8(kind), u32(data), crc(uuid, len, kind, data), ptr(offset))]
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct ObjectHeader {
 	#[from(uuid)]
@@ -73,8 +73,8 @@ pub(crate) struct ObjectHeader {
 	#[from(kind)]
 	pub(crate) kind: ObjectKind,
 
-	#[from(crc)]
-	pub(crate) crc: u32,
+	#[from(data)]
+	pub(crate) data_crc: u32,
 
 	#[from(offset)]
 	pub(crate) position: u64
@@ -106,7 +106,7 @@ impl Object {
 		crc.update((header.length as u32).to_le_bytes());
 		crc.update(&data);
 
-		if crc.into_u32() == header.crc {
+		if crc.into_u32() == header.data_crc {
 			Ok(Some(Self {
 				header,
 				data: ObjectData::Owned(data)

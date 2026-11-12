@@ -25,16 +25,30 @@ pub(crate) struct Page {
 
 type Timestamp = chrono::DateTime<chrono::Utc>;
 
-#[binary(magic(b"page"), u64(seq), u32(len), Timestamp(created), crc(magic, seq, len, created))]
+#[binary(magic(b"page"), u64(seq), u32(len), Timestamp(created), crc(magic, seq, len, created), ptr(pos))]
 pub(crate) struct PageHeader {
 	#[from(seq)]
 	seq: u64,
+
+	#[from(pos)]
+	page_start: u64,
 
 	#[from(len)]
 	page_size: u32,
 
 	#[from(created)]
 	created: Timestamp
+}
+
+impl PageHeader {
+	pub(crate) fn from_page(page: &Page) -> Self {
+		Self {
+			seq: page.seq,
+			page_start: page.page_start,
+			page_size: page.page_size as u32,
+			created: page.created,
+		}
+	}
 }
 
 const SUMMARY_MAGIC_NUMBER_LENGTH: usize = 4;
@@ -70,6 +84,7 @@ impl Page {
 	// pub(crate) const FIRST_PAGE_OFFSET: u64 = 0x1_0000;
 	pub(crate) const FIRST_PAGE_OFFSET: u64 = 0x50;
 	pub(crate) const ALIGNMENT: u64 = 0x10;
+	pub(crate) const MAX_OBJECT_PAYLOAD: u64 = 0x400_000;
 
 	pub(crate) fn new(seq: u64, size: usize) -> Page {
 		Self {
@@ -128,6 +143,7 @@ impl Page {
 		if !self.is_sealed() {
 			PageHeader {
 				seq: self.seq,
+				page_start: self.page_start,
 				page_size: self.page_size as u32,
 				created: self.created,
 			}.write(dev)?;
@@ -205,6 +221,10 @@ impl Page {
 	}
 
 	pub(crate) fn can_fit_object_of_length(&self, len: usize) -> bool {
+		if len as u64 > Self::MAX_OBJECT_PAYLOAD {
+			return false;
+		}
+
 		let Some(c) = self.contents.as_ref() else {
 			// If the `contents` is empty, we can be fairly certain the page is sealed.
 			// Returning `false` on a false negative is fine since we'd rather be safe than writing to an over-full page.
@@ -221,6 +241,37 @@ impl Page {
 		let theoretical_summary_offset = self.page_size - PageFooter::SIZE - c.len() * PageSummaryEntry::SIZE - SUMMARY_MAGIC_NUMBER_LENGTH;
 
 		(offset + len as Offset + ObjectHeader::SIZE as Offset) < theoretical_summary_offset as Offset
+	}
+
+	pub(crate) fn seal(&mut self, writer: &mut Writer<impl Device>) -> Result<()> {
+		if let Some(ref c) = self.contents {
+			// Check if we can still fit a summary. Skip if not.
+
+			let theoretical_summary_offset = (self.page_size - PageFooter::SIZE - c.len() * PageSummaryEntry::SIZE - SUMMARY_MAGIC_NUMBER_LENGTH) as u64 + self.page_start;
+
+			// If we've already written past where the summary should go, then skip it.
+			// A situation could occur where an object is written into the space the summary should go, then the database was closed and reopened, such that the cursor hasn't caught up yet.
+			if writer.position() <= theoretical_summary_offset && c.last()
+				.is_some_and(|obj| obj.position + obj.length as u64 + ObjectHeader::SIZE as u64 <= theoretical_summary_offset) {
+
+				writer.try_seek_to(theoretical_summary_offset)?;
+
+				PageSummary {
+					summary: c.iter()
+						.map(|i| PageSummaryEntry {
+							uuid: i.uuid,
+							offset: (i.position - self.page_start) as Offset,
+						})
+						.collect(),
+				}.write(writer)?;
+
+				PageFooter {
+					len: c.len()
+				}.write(writer)?;
+			}
+		};
+
+		Ok(())
 	}
 }
 
