@@ -86,11 +86,11 @@ impl Page {
 	pub(crate) const ALIGNMENT: u64 = 0x10;
 	pub(crate) const MAX_OBJECT_PAYLOAD: u64 = 0x400_000;
 
-	pub(crate) fn new(seq: u64, size: usize) -> Page {
+	pub(crate) fn new(seq: u64, size: usize, page_offset: u64) -> Page {
 		Self {
 			seq,
 			page_size: size,
-			page_start: Self::FIRST_PAGE_OFFSET + seq * size as u64,
+			page_start: page_offset + seq * size as u64,
 			created: Default::default(),
 
 			contents: Default::default(),
@@ -106,9 +106,12 @@ impl Page {
 
 		let summary = if let Ok(footer) = PageFooter::read(dev) && footer.len > 0 {
 			let summary_start = header.page_size as u64 - PageFooter::SIZE as u64 - footer.len as u64 * PageSummaryEntry::SIZE as u64 - SUMMARY_MAGIC_NUMBER_LENGTH as u64;
-			dev.seek_to(offset + summary_start);
+			let mut win = dev.slice(
+				offset + summary_start,
+				SUMMARY_MAGIC_NUMBER_LENGTH as u64 + footer.len as u64 * PageSummaryEntry::SIZE as u64,
+			);
 
-			let summary = PageSummary::read(dev)?;
+			let summary = PageSummary::read(&mut win)?;
 
 			Some(PageTrailer {
 				global_offset: offset + summary_start,
@@ -171,7 +174,19 @@ impl Page {
 	}
 
 	pub(crate) fn preload_records(&mut self, dev: Reader<impl Device>) -> Result<()> {
-		self.contents.replace(self.iter(dev).collect::<Result<_>>()?);
+		let mut records = self.iter(dev.clone()).collect::<Result<Vec<_>>>()?;
+
+		while let Some(last) = records.last() {
+			let mut data = dev.clone().with_seek(last.position + ObjectHeader::SIZE as u64);
+
+			if let Ok(Some(..)) = Object::from_header(*last, &mut data) {
+				break;
+			}
+
+			records.pop();
+		}
+
+		self.contents.replace(records);
 		Ok(())
 	}
 
@@ -238,7 +253,7 @@ impl Page {
 			.unwrap_or(PageHeader::SIZE as Offset)
 			.next_multiple_of(Page::ALIGNMENT as u32);
 
-		let theoretical_summary_offset = self.page_size - PageFooter::SIZE - c.len() * PageSummaryEntry::SIZE - SUMMARY_MAGIC_NUMBER_LENGTH;
+		let theoretical_summary_offset = self.page_size - PageFooter::SIZE - (c.len() + 1) * PageSummaryEntry::SIZE - SUMMARY_MAGIC_NUMBER_LENGTH;
 
 		(offset + len as Offset + ObjectHeader::SIZE as Offset) < theoretical_summary_offset as Offset
 	}
@@ -268,6 +283,8 @@ impl Page {
 				PageFooter {
 					len: c.len()
 				}.write(writer)?;
+			} else {
+				return Err(Error::OversizedPage)
 			}
 		};
 
@@ -320,10 +337,9 @@ impl<'a, Dev: Device> Iterator for PageIter<'a, Dev> {
 						}
 						Some(Ok(header))
 					}
-					Err(e) if e.is_eof() => None,
-					Err(e) => {
+					Err(..) => {
 						self.did_return_error = true;
-						Some(Err(e))
+						None
 					},
 				}
 			}

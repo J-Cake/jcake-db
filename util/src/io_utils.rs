@@ -26,8 +26,10 @@ impl<Dev: Device + ?Sized> Device for &mut Dev {
 impl Device for File {
 	fn read_at(&self, offset: u64, len: usize) -> Result<Box<[u8]>> {
 		let mut buf = vec![0u8; len].into_boxed_slice();
-		if let Err(err) = sys::read_exact_at(self, &mut buf, offset) && err.kind() == ErrorKind::UnexpectedEof {
-			return Err(Error::eof());
+		match sys::read_exact_at(self, &mut buf, offset) {
+			Ok(..) => (),
+			Err(err) if err.kind() == ErrorKind::UnexpectedEof => return Err(Error::eof()),
+			Err(err) => return Err(Error::new(err.to_string()))
 		};
 
 		Ok(buf)

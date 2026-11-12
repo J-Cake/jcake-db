@@ -211,6 +211,17 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
     }
 
     fn active_page_mut(&mut self) -> Result<&mut Page> {
+        if let None = self.active_page {
+            let count = self.page_count()? as PageNr;
+
+            return if count > 0 && let LoadedPage::Open(page) = self.load_page(count - 1)? {
+                self.active_page.replace(page);
+                Ok(self.active_page.as_mut().expect("Set above"))
+            } else {
+                Ok(self.new_page()?)
+            }
+        }
+
         let have_active = self.active_page.as_ref()
             .is_some_and(|p| !p.is_sealed());
 
@@ -237,9 +248,9 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         let page_nr = if let Some(ref mut page) = self.active_page {
             page.seal(&mut self.backing)?;
             page.seq + 1
-        } else { 0 };
+        } else { self.page_count()? as u64 };
 
-        let mut page = Page::new(page_nr, self.page_size as usize);
+        let mut page = Page::new(page_nr, self.page_size as usize, self.page_offset as u64);
         page.contents.replace(Default::default());
         page.write_struct(&mut self.backing)?;
 

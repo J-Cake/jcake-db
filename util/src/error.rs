@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum Error {
     Misc(String),
     EOF,
+    OversizedPage,
 }
 
 impl std::fmt::Display for Error {
