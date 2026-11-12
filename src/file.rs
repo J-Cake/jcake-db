@@ -128,27 +128,16 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
 
     fn index(&mut self) -> Result<()> {
         let mut records = 0usize;
-        let mut max_page = 0 as PageNr;
-        for page_nr in 0 as PageNr.. {
-            let reader = self.backing.reader();
-            let page = match self.load_page(page_nr) {
-                Ok(page) => page,
-                Err(Error::EOF) => break,
-                Err(err) => return Err(err),
-            };
+        let page_count = self.page_count()? as PageNr;
 
-            // TODO: figure out a way to handle pages properly.
-
-            records += page.count_records(reader);
-            max_page = page_nr;
+        for page_nr in 0..page_count {
+            records += self.load_page(page_nr)?.count_records(self.backing.reader());
         }
 
         let mut index = Index::with_capacity_and_hasher(records, BuildHasherDefault::new());
 
-        for page_nr in 0..=max_page {
-            let Ok(page) = self.load_page(page_nr) else {
-                break;
-            };
+        for page_nr in 0..page_count {
+            let page = self.load_page(page_nr)?;
 
             for record in page.iter(self.backing.reader()) {
                 let Ok(record) = record else {
@@ -189,18 +178,29 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
     fn page_count(&self) -> Result<usize> {
         let max = self.get_last_known_page_nr();
 
-        let mut reader = self.backing.reader();
-
         for page_nr in max.. {
-            reader.seek_to(self.page_offset as u64 + page_nr as u64 * self.page_size as u64);
-            match PageHeader::read(&mut reader) {
-                Ok(_) => continue,
-                Err(err) if err.is_eof() => return Ok(page_nr as usize),
-                Err(err) => return Err(err)
+            if !self.page_exists(page_nr)? {
+                return Ok(page_nr as usize)
             }
         }
 
         unreachable!()
+    }
+
+    fn page_exists(&self, page_nr: PageNr) -> Result<bool> {
+        let start = self.page_offset as u64 + page_nr * self.page_size as u64;
+        let mut reader = self.backing.reader().with_seek(start);
+
+        match reader.read(PageHeader::SIZE) {
+            Err(err) if err.is_eof() => Ok(false),
+            Err(err) => Err(err),
+            Ok(raw) if raw.iter().all(|b| *b == 0) => Ok(false),
+            Ok(_) => {
+                // Something is there: it must be a valid header.
+                PageHeader::read(&mut self.backing.reader().with_seek(start))?;
+                Ok(true)
+            }
+        }
     }
 
     fn get_last_known_page_nr(&self) -> PageNr {
