@@ -22,10 +22,26 @@ jaq-core = { version = "3.1.2", optional = true }
 jaq-json = { version = "2.0.3", optional = true, features = ["serde"] }
 jaq-std = { version = "3.0.4", optional = true }
 axum-core = "0.5.6"
+hyper = { version = "1.12.0", optional = true }
+hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"], optional = true }
+http-body-util = { version = "0.1.5", optional = true }
+base64 = { version = "0.23.1", optional = true }
+hmac = { version = "0.13.0", optional = true }
+sha2 = { version = "0.11.1", optional = true }
 
 [features]
 debug = ["clap"]
-web = ["clap/derive", "clap/env", "axum/macros", "tokio/full", "serde_json", "chrono/now", "chrono/serde", "jaq-core", "jaq-json/serde", "jaq-std"]
+web = [
+    "clap/derive", "clap/env",
+    "axum/macros",
+    "tokio/full",
+    "serde_json",
+    "chrono/now", "chrono/serde",
+    "jaq-core", "jaq-json/serde", "jaq-std",
+    "hyper", "hyper-util/client", "hyper-util/http2", "hyper-util/tokio", "http-body-util",
+    "base64",
+    "hmac", "sha2"
+]
 
 [[bin]]
 name = "repl"
@@ -34,5 +50,5 @@ required-features = ["debug"]
 
 [[bin]]
 name = "web"
-path = "src/bin/web.rs"
+path = "src/bin/web/main.rs"
 required-features = ["web"]
