@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use base64::engine::general_purpose::STANDARD as base64_standard;
+use chrono::Utc;
 use crate::ClusterArgs;
 
 #[derive(Clone)]
@@ -95,7 +96,12 @@ pub(crate) async fn discovery(cluster: axum::extract::State<Cluster>, body: Json
 		cluster.add_member(peer).await
 	}
 
-	(hyper::StatusCode::OK, Json(cluster.member_list.read().await.values().collect::<Vec<_>>()))
+	(hyper::StatusCode::OK, Json(cluster.member_list.read().await.values()
+		.map(|member| Member {
+			epoch_µs: Utc::now().timestamp_micros() as u64,
+			..*member
+		})
+		.collect::<Vec<_>>()))
 		.into_response()
 }
 
