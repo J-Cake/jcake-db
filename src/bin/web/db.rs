@@ -1,5 +1,6 @@
 use std::io;
 use std::io::Error;
+use std::time::Duration;
 use jaq_core::{data, Compiler, Ctx, Vars, unwrap_valr};
 use jaq_core::load::{Arena, File, Loader};
 use jaq_json::Val;
@@ -8,18 +9,54 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::sync::oneshot;
+use tokio::time::sleep;
 use uuid::Uuid;
 use db::TypedDatabase;
 use util::traits::ToBytes;
 use crate::Args;
+use crate::cluster::Cluster;
 
 #[derive(Clone)]
-pub(crate) struct DbHandle {
+pub(crate) struct DbHandleInner {
 	sender: UnboundedSender<Request>,
+	id: Uuid
+}
+
+#[derive(Clone)]
+pub(crate) enum DbHandle {
+	Local {
+		db: DbHandleInner,
+	},
+	Cluster {
+		db: DbHandleInner,
+		cluster: Cluster
+	}
 }
 
 impl DbHandle {
-	pub(crate) async fn msg<Ret: DeserializeOwned>(&self, req: RequestIntention) -> io::Result<Ret> {
+	fn sender(&self) -> UnboundedSender<Request> {
+		match self {
+			DbHandle::Local { db } => db.sender.clone(),
+			DbHandle::Cluster { db, .. } => db.sender.clone(),
+		}
+	}
+
+	pub(crate) fn id(&self) -> Uuid {
+		match self {
+			DbHandle::Local { db } | DbHandle::Cluster { db, .. } => db.id
+		}
+	}
+
+	fn into_cluster(self, cluster: Cluster) -> Self {
+		match self {
+			Self::Cluster { db, .. } | Self::Local { db } => Self::Cluster {
+				db,
+				cluster
+			}
+		}
+	}
+
+	async fn msg<Ret: DeserializeOwned>(&self, req: RequestIntention) -> io::Result<Ret> {
 		let (tx, rx) = oneshot::channel::<db::Result<Value>>();
 
 		let req = Request {
@@ -27,7 +64,7 @@ impl DbHandle {
 			res: tx,
 		};
 
-		if let Err(_) = self.sender.send(req) {
+		if let Err(_) = self.sender().send(req) {
 			return Err(io::Error::other("Failed to dispatch request"));
 		};
 
@@ -79,11 +116,15 @@ pub(crate) async fn open_db(args: &Args) -> io::Result<DbHandle> {
 	let db = args.db.to_owned();
 
 	let mapper = args.extractor.clone();
+	let (id_tx, id_rx) = oneshot::channel();
 
 	std::thread::Builder::new().name("db-worker".into()).spawn(move || {
 		let mapper = prepare_mapper(&mapper).expect("Invalid extractor function");
 
 		let mut db = TypedDatabase::new(db).expect("Failed to open database").with_mapper(mapper);
+
+		id_tx.send(db.id())
+			.expect("Failed to send DB ID");
 
 		while let Some(req) = rx.blocking_recv() {
 			if let Err(_) = match req.inner {
@@ -113,7 +154,12 @@ pub(crate) async fn open_db(args: &Args) -> io::Result<DbHandle> {
 		}
 	})?;
 
-	Ok(DbHandle { sender: tx })
+	Ok(DbHandle::Local {
+		db: DbHandleInner {
+			sender: tx,
+			id: id_rx.await.map_err(|err| Error::other(err.to_string()))?,
+		}
+	})
 }
 
 fn prepare_mapper(code: &str) -> Result<impl Fn(&Value) -> Vec<Box<[u8]>> + 'static, String> {

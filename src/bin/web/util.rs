@@ -11,6 +11,7 @@ use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper_util::{client::legacy::{connect::HttpConnector, Client}, rt::TokioExecutor};
 use serde::{de::DeserializeOwned, Serialize};
+use crate::util::colours::ColouredStringBuilder;
 
 pub(crate) type HttpClient = Client<HttpConnector, Body>;
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -103,4 +104,93 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 		diff |= x ^ y;
 	}
 	std::hint::black_box(diff) == 0
+}
+
+pub mod colours {
+	use std::fmt::Display;
+	use std::ops::{Deref, DerefMut};
+	use crate::util::now;
+
+	const RESET: &str = "\x1b[m";
+
+	macro_rules! colours {
+    ($(const $name:ident = $colour:literal;)*) => {
+	    $(
+		    pub fn $name(mut self, text: impl AsRef<str>) -> Self {
+			    self.str.push_str($colour);
+			    self.str.push_str(text.as_ref());
+			    self.str.push_str(RESET);
+			    self
+		    }
+	    )*
+    };
+}
+
+	#[derive(Default)]
+	pub struct ColouredStringBuilder {
+		str: String,
+	}
+
+	impl ColouredStringBuilder {
+		colours! {
+			const black = "\x1b[30m";
+			const red = "\x1b[31m";
+			const green = "\x1b[32m";
+			const yellow = "\x1b[33m";
+			const blue = "\x1b[34m";
+			const purple = "\x1b[35m";
+			const cyan = "\x1b[36m";
+			const white = "\x1b[37m";
+			const grey = "\x1b[90m";
+			const red_intense = "\x1b[91m";
+			const green_intense = "\x1b[92m";
+			const yellow_intense = "\x1b[93m";
+			const blue_intense = "\x1b[94m";
+			const purple_intense = "\x1b[95m";
+			const cyan_intense = "\x1b[96m";
+			const white_intense = "\x1b[97m";
+		}
+
+		pub fn normal(mut self, text: impl AsRef<str>) -> Self {
+			self.str.push_str(text.as_ref());
+			self
+		}
+
+		pub fn now(mut self) -> Self {
+			self.grey(format!("[{now}] ", now=now()))
+		}
+
+		pub fn finish(self) -> String {
+			self.str
+		}
+
+		pub fn print(self) {
+			println!("{str}", str=self.str);
+		}
+
+		pub fn eprint(self) {
+			eprintln!("{str}", str=self.str);
+		}
+	}
+
+	impl Deref for ColouredStringBuilder {
+		type Target = String;
+
+		fn deref(&self) -> &Self::Target {
+			&self.str
+		}
+	}
+
+	impl DerefMut for ColouredStringBuilder {
+		fn deref_mut(&mut self) -> &mut Self::Target {
+			&mut self.str
+		}
+	}
+}
+
+pub(crate) fn info(msg: impl AsRef<str>) {
+	ColouredStringBuilder::default()
+		.now()
+		.normal(msg)
+		.print();
 }

@@ -28,6 +28,8 @@ use crate::file::open;
 use crate::object::Object;
 
 pub trait ObjectStore: Sized {
+    fn id(&self) -> Uuid;
+
     fn compact_db(&mut self) -> Result<()>;
     fn entries(&self) -> impl Iterator<Item=Object>;
 
@@ -44,6 +46,10 @@ pub struct TypedDatabase<Db: ObjectStore> {
 }
 
 impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
+    pub fn id(&self) -> Uuid {
+        self.backing.id()
+    }
+
     pub fn insert(&mut self, data: impl Serialize) -> Result<Uuid> {
         let obj = jsonb::to_owned_jsonb(&data)?;
         let uuid = self.backing.insert(&obj.as_ref())?;

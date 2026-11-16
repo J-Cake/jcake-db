@@ -1,3 +1,5 @@
+#![feature(gethostname)]
+
 mod cluster;
 mod db;
 mod http;
@@ -7,7 +9,6 @@ use hyper::StatusCode;
 use crate::util::{now, parse_duration};
 use axum::Json;
 use axum::middleware::Next;
-use chrono::Local;
 use clap::Parser;
 use http::method;
 use serde_json::json;
@@ -18,14 +19,13 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use axum::handler::Handler;
 use axum::http::header;
 use axum_core::response::IntoResponse;
-use hyper::Request;
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
 use crate::cluster::{Cluster, ClusterToken};
 use crate::cluster::ClusterInner;
+use crate::util::colours::ColouredStringBuilder;
 
 #[derive(clap::Parser)]
 struct Args {
@@ -50,13 +50,16 @@ enum Mode {
 
 #[derive(clap::Args)]
 struct ClusterArgs {
-    /// Join token: <cluster_id>.<secret_hex>
+    /// Join token: <secret_base64>@<cluster_fqdn>
     #[arg(long, env = "DB_CLUSTER_TOKEN", hide_env_values = true)]
     token: ClusterToken,
 
     /// Socket for cluster-internal traffic (gossip, forwarding)
     #[arg(long, default_value = "0.0.0.0:7700", env = "DB_GOSSIP_BIND")]
     gossip_bind: SocketAddr,
+
+    #[arg(long, env = "DB_GOSSIP_ADVERTISE")]
+    pub(crate) advertise_addr: Option<SocketAddr>,
 
     /// Number of copies per object (R)
     #[arg(long, default_value_t = 2, env = "DB_REPLICAS")]
@@ -90,6 +93,7 @@ pub async fn main() -> io::Result<()> {
     let args = Args::parse();
 
     let db = db::open_db(&args).await?;
+    let id = db.id();
 
     let app = axum::Router::new()
         .route("/", method::query(http::query))
@@ -105,15 +109,17 @@ pub async fn main() -> io::Result<()> {
             }})
         }))
         .with_state(db)
+        .layer(axum::extract::DefaultBodyLimit::max(8_388_608)) // 8 MiB to account for JSON losses
         .layer(axum::middleware::from_fn(log));
 
-    println!("[{now}]: Starting webservice on {socket:?}", now = now(), socket = &args.bind);
+    util::info(format!("Starting webservice on {socket:?}", socket=&args.bind));
 
     let gossip = match args.mode {
         None => None,
         Some(Mode::Cluster(args)) => {
             let listener = TcpListener::bind(&args.gossip_bind).await?;
-            let cluster = ClusterInner::new(&args);
+            let cluster = ClusterInner::new(&args, id).await
+                .map_err(|err| io::Error::other(err.to_string()))?;
 
             let gossip = Arc::clone(&cluster);
             tokio::spawn(async move {
@@ -153,7 +159,21 @@ async fn log(req: axum::extract::Request, next: Next) -> impl IntoResponse {
     let path = req.uri().path().to_string();
     let res = next.run(req).await;
 
-    println!("[{now}] {status} {method} {path}", now = now(), status = res.status().as_str());
+    let str = ColouredStringBuilder::default()
+        .now();
+
+    let str = match res.status().as_u16() {
+        200..300 => str.green(res.status().as_str()),
+        300..400 => str.yellow(res.status().as_str()),
+        400..500 => str.purple(res.status().as_str()),
+        500..600 => str.red(res.status().as_str()),
+        _ => str.normal(res.status().as_str())
+    };
+
+    str.normal(method)
+        .normal(" ")
+        .grey(path)
+        .print();
 
     res
 }

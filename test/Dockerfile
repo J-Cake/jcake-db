@@ -6,7 +6,7 @@ COPY ./format /app/format
 COPY ./src /app/src
 COPY ./util /app/util
 COPY ./Cargo.toml /app/Cargo.toml
-Copy ./Cargo.lock /app/Cargo.lock
+COPY ./Cargo.lock /app/Cargo.lock
 
 WORKDIR /app
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

@@ -341,6 +341,10 @@ impl Location {
 pub(crate) type Index = HashMap<u128, Location, BuildHasherDefault<FoldHasher>>;
 
 impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
+    fn id(&self) -> Uuid {
+        self.uuid
+    }
+
     fn compact_db(&mut self) -> Result<()> {
         todo!()
     }
