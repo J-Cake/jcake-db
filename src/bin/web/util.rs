@@ -395,3 +395,33 @@ pub(crate) fn error(msg: impl AsRef<str>) {
 		.normal(msg)
 		.eprint();
 }
+
+pub(crate) trait MaxN: Iterator + Sized {
+	/// The `n` largest items by key, largest first. On ties the later item
+	/// ranks first, matching `max_by_key`.
+	fn max_n_by_key<K: Ord>(self, n: usize, mut key: impl FnMut(&Self::Item) -> K) -> Vec<Self::Item> {
+		let mut top: Vec<(K, Self::Item)> = Vec::with_capacity(n + 1);
+
+		if n == 0 {
+			return Vec::new();
+		}
+
+		for item in self {
+			let k = key(&item);
+
+			// first position whose key isn't strictly greater: new item goes before equals
+			let pos = top.partition_point(|(tk, _)| *tk > k);
+
+			if pos < n {
+				top.insert(pos, (k, item));
+				top.truncate(n);
+			}
+		}
+
+		top.into_iter()
+			.map(|(_, item)| item)
+			.collect()
+	}
+}
+
+impl<I: Iterator> MaxN for I {}

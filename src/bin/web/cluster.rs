@@ -19,9 +19,12 @@ use base64::engine::general_purpose::STANDARD as base64_standard;
 use chrono::Utc;
 use tokio::net::UdpSocket;
 use format::Error;
+use util::Crc;
 use crate::{headers, ClusterArgs};
+use crate::local_db::RequestIntention;
 use crate::util::colours::ColouredStringBuilder;
 use crate::util::http::RequestError;
+use crate::util::MaxN;
 
 #[derive(Clone)]
 pub(crate) struct ClusterToken {
@@ -113,20 +116,10 @@ pub(crate) struct ClusterInner {
 	member_list: RwLock<BTreeMap<Uuid, Member>>,
 	http: crate::util::http::HttpClient,
 	ad: SocketAddr,
+	replicas: usize,
 }
 
 impl ClusterInner {
-	async fn add_member(&self, member: Member) {
-		if member.uuid != self.id {
-			self.member_list
-				.write()
-				.await
-				.entry(member.uuid)
-				.and_modify(|existing| existing.merge(&member))
-				.or_insert(member);
-		}
-	}
-
 	pub(crate) async fn new(args: &ClusterArgs, id: Uuid) -> Result<Cluster> {
 		if args.token.secret.len() < 8 {
 			return Err(ClusterError::token_error("Too Short"))
@@ -153,6 +146,7 @@ impl ClusterInner {
 		Ok(Arc::new(Self {
 			id,
 			ad,
+			replicas: args.replicas,
 			token: args.token.clone(),
 			discover_interval: args.gossip_interval,
 			member_list: RwLock::new(BTreeMap::from([
@@ -168,6 +162,50 @@ impl ClusterInner {
 					"Authorization": &format!("Bearer {token}", token=base64_standard.encode(&args.token.secret))
 				}.map_err(|err| ClusterError::InitialisationError(RequestError::InvalidHeaderError(err)))?),
 		}))
+	}
+
+	async fn add_member(&self, member: Member) {
+		if member.uuid != self.id {
+			self.member_list
+				.write()
+				.await
+				.entry(member.uuid)
+				.and_modify(|existing| existing.merge(&member))
+				.or_insert(member);
+		}
+	}
+
+	pub(crate) async fn members(&self) -> Vec<Member> {
+		self.member_list.read().await.values().cloned().collect()
+	}
+
+	pub(crate) async fn get_owners(&self, uuid: Uuid) -> Vec<Member> {
+		// `max_by_key` returns the last-found maximum of all that are found.
+		// Since this is a BTreeMap, the objects are ordered by UUID already, making them
+		// have the same order on all nodes and provides a reliable tie-breaker.
+		// DO NOT swap the backing structure for a HashMap without considering this.
+		// TODO: Factorise this to allow for replication to take the top N
+		self.member_list
+			.read().await
+			.values()
+			.filter(|i| !i.left)
+			.cloned()
+			.max_n_by_key(self.replicas, |member| {
+				let mut rank = Crc::new();
+
+				rank.update(member.uuid.as_bytes());
+				rank.update(uuid.as_bytes());
+
+				let mut rank = u32::from_le_bytes(rank.finish());
+
+				// MurmurHash3
+				rank ^= rank >> 16;
+				rank = rank.wrapping_mul(0x85eb_ca6b);
+				rank ^= rank >> 13;
+				rank = rank.wrapping_mul(0xc2b2_ae35);
+
+				rank ^ (rank >> 16)
+			})
 	}
 
 	async fn join_request(&self) -> Discovery {
@@ -246,7 +284,7 @@ struct Member {
 	uuid: Uuid,
 	#[serde(rename = "epoch")]
 	epoch_µs: u64,
-	addr: SocketAddr,
+	pub(crate) addr: SocketAddr,
 	left: bool,
 }
 

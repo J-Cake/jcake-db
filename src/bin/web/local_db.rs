@@ -1,5 +1,6 @@
 use std::io;
 use std::io::Error;
+use std::net::SocketAddr;
 use jaq_core::data;
 use jaq_core::Compiler;
 use jaq_core::Ctx;
@@ -63,6 +64,35 @@ impl DbHandle {
 	}
 
 	async fn msg<Ret: DeserializeOwned>(&self, req: RequestIntention) -> io::Result<Ret> {
+		match self {
+			Self::Local { .. } => self.msg_local(req).await,
+			Self::Cluster { cluster, .. } => match req {
+				RequestIntention::Query(data) => {
+					for members in cluster.members() {
+
+					}
+				},
+				RequestIntention::Fetch(uuid) => {
+					let member = cluster.get_owners(uuid).await.first();
+				},
+				RequestIntention::Insert(_) => {
+
+				},
+				RequestIntention::Upsert(_, _) => {
+
+				},
+				RequestIntention::Delete(_) => {
+
+				},
+			}
+		}
+	}
+
+	async fn msg_cluster<Ret: DeserializeOwned>(&self, owner: SocketAddr, req: RequestIntention) -> io::Result<Ret> {
+
+	}
+
+	async fn msg_local<Ret: DeserializeOwned>(&self, req: RequestIntention) -> io::Result<Ret> {
 		let (tx, rx) = oneshot::channel::<db::Result<Value>>();
 
 		let req = Request {
@@ -109,7 +139,7 @@ struct Request {
 	res: oneshot::Sender<db::Result<Value>>,
 }
 
-enum RequestIntention {
+pub(crate) enum RequestIntention {
 	Query(Box<[u8]>),
 	Fetch(Uuid),
 	Insert(Value),
