@@ -347,6 +347,7 @@ dependencies = [
  "jaq-json",
  "jaq-std",
  "jsonb",
+ "libc",
  "serde",
  "serde_json",
  "sha2",

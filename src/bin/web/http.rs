@@ -4,7 +4,7 @@ use axum::Json;
 use axum_core::response::IntoResponse;
 use serde_json::Value;
 use uuid::Uuid;
-use crate::db::DbHandle;
+use crate::local_db::DbHandle;
 
 pub(crate) mod method {
 	use axum::extract::Request;

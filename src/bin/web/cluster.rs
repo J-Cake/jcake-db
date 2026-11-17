@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use axum::http::HeaderValue;
 use axum::Json;
 use axum_core::response::IntoResponse;
 use base64::Engine;
@@ -16,6 +17,7 @@ use uuid::Uuid;
 use base64::engine::general_purpose::STANDARD as base64_standard;
 use chrono::Utc;
 use tokio::net::UdpSocket;
+use format::Error;
 use crate::ClusterArgs;
 use crate::util::colours::ColouredStringBuilder;
 
@@ -31,6 +33,21 @@ impl FromStr for ClusterToken {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		let Some((token, cluster)) = s.split_once('@') else {
 			return Err(Self::Err::new(ErrorKind::InvalidValue))
+		};
+
+		if cluster.len() > 253 || !cluster.strip_suffix('.')
+			.unwrap_or(cluster)
+			.split('.')
+			.all(|name| {
+				// max length
+				// all are alphanumeric or `-`
+				// doesn't start or end with `-`
+				(1..=63).contains(&name.len())
+					&& name.bytes().all(|char| char.is_ascii_alphanumeric() || char == b'-')
+					&& !name.starts_with('-')
+					&& !name.ends_with('-')
+			}) {
+			return Err(clap::error::Error::raw(ErrorKind::InvalidValue, ClusterError::invalid_cluster_name(cluster)))
 		};
 
 		Ok(Self {
@@ -51,15 +68,35 @@ impl std::fmt::Debug for ClusterToken {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum ClusterError {
-	DnsError(String)
+	DnsError(String),
+	TokenError(String),
+	AdvertisingAddressError(String),
+	InvalidClusterName(String)
+}
+
+impl ClusterError {
+	fn token_error(msg: impl AsRef<str>) -> Self {
+		Self::TokenError(msg.as_ref().to_string())
+	}
+
+	fn malformed_ad_addr(msg: impl AsRef<str>) -> Self {
+		Self::AdvertisingAddressError(msg.as_ref().to_string())
+	}
+
+	fn invalid_cluster_name(msg: impl AsRef<str>) -> Self {
+		Self::InvalidClusterName(msg.as_ref().to_string())
+	}
 }
 
 impl Display for ClusterError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			ClusterError::DnsError(err) => write!(f, "DNS Error: {err}")
+			ClusterError::DnsError(err) => write!(f, "DNS Error: {err}"),
+			ClusterError::TokenError(err) => write!(f, "Invalid Token: {err}"),
+			ClusterError::AdvertisingAddressError(err) => write!(f, "Malformed Advertising Address: {err}"),
+			ClusterError::InvalidClusterName(err) => write!(f, "Cluster name not a valid DNS host: {err}")
 		}
 	}
 }
@@ -77,7 +114,6 @@ pub(crate) struct ClusterInner {
 	ad: SocketAddr,
 }
 
-
 impl ClusterInner {
 	async fn add_member(&self, member: Member) {
 		if member.uuid != self.id {
@@ -91,8 +127,27 @@ impl ClusterInner {
 	}
 
 	pub(crate) async fn new(args: &ClusterArgs, id: Uuid) -> Result<Cluster> {
+		if args.token.secret.len() < 8 {
+			return Err(ClusterError::token_error("Too Short"))
+		}
+
+		if args.token.secret.len() < 16 {
+			ColouredStringBuilder::default()
+				.now()
+				.yellow("Warning:")
+				.normal(" The token is less than 16 bytes long. This is not recommended in production scenarios.")
+				.eprint()
+		}
+
+		clock_sync().await;
+
 		let ad = get_advertising_addr(args).await
-			.expect("Failed to get advertising address.");
+			.map_err(|err| ClusterError::malformed_ad_addr(err.to_string()))?;
+
+		let mut header = HeaderValue::from_str(&format!("Bearer {secret}", secret=base64_standard.encode(&args.token.secret)))
+			.map_err(|err| return ClusterError::token_error(err.to_string()))?;
+
+		header.set_sensitive(true);
 
 		Ok(Arc::new(Self {
 			id,
@@ -107,7 +162,7 @@ impl ClusterInner {
 					left: false,
 				})
 			])),
-			http: crate::util::client(),
+			http: crate::util::HttpClient::new(header),
 		}))
 	}
 
@@ -118,19 +173,10 @@ impl ClusterInner {
 				.values()
 				.cloned()
 				.collect(),
-			own_id: self.id
 		}
 	}
 
 	pub(crate) fn check_token(&self, token: &str) -> bool {
-		if token.len() <= 2 {
-			return false;
-		}
-
-		if token.len() <= 16 {
-			eprintln!("\x1b[33mWARNING:\x1b[m The token is less than 16 bytes long. This is not recommended in production scenarios.");
-		}
-
 		let Ok(bytes) = base64_standard.decode(token) else {
 			return false;
 		};
@@ -145,15 +191,13 @@ impl ClusterInner {
 		let join = self.join_request().await;
 
 		for name in ips {
-			let Ok(uri) = Uri::builder()
-				.scheme("http")
-				.authority(name.to_string())
-				.path_and_query("/discover")
-				.build() else {
-				continue;
-			};
+			let Ok(uri) = crate::util::peer_uri(name, "/discovery")
+				.inspect_err(|err| crate::util::error(err.to_string())) else {
+					continue;
+				};
 
-			let Ok(res) = crate::util::post_json::<_, Vec<Member>>(&self.http, uri, &join).await else {
+			let Ok(res) = crate::util::post_json::<_, Vec<Member>>(&self.http, uri, &join).await
+				.inspect_err(|err| crate::util::error(err.to_string())) else {
 				continue;
 			};
 
@@ -230,7 +274,7 @@ async fn get_advertising_addr(args: &ClusterArgs) -> io::Result<SocketAddr> {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Discovery {
 	known_peers: Vec<Member>,
-	own_id: Uuid
+	// own_id: Uuid
 }
 
 pub(crate) async fn discovery(cluster: axum::extract::State<Cluster>, body: Json<Discovery>) -> impl IntoResponse {
@@ -238,7 +282,55 @@ pub(crate) async fn discovery(cluster: axum::extract::State<Cluster>, body: Json
 		cluster.add_member(peer).await
 	}
 
-	(hyper::StatusCode::OK, Json(cluster.member_list.read().await.values()
-		.collect::<Vec<_>>()))
+	(hyper::StatusCode::OK, Json(serde_json::json! {{
+		"known_peers": cluster.member_list.read().await // Instead of a `Discovery`, saves a clone.
+			.values()
+			.collect::<Vec<_>>()
+	}}))
 		.into_response()
+}
+
+async fn clock_sync() {
+	match clock_synced() {
+		Some(true) => {}
+		Some(false) => {
+			ColouredStringBuilder::default()
+				.now()
+				.yellow("Warning: ")
+				.normal("System clock isn't synced yet. Waiting up to 5s.")
+				.eprint();
+
+			let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+			while tokio::time::Instant::now() < deadline && clock_synced() == Some(false) {
+				tokio::time::sleep(Duration::from_millis(500)).await;
+			}
+
+			if clock_synced() != Some(true) {
+				ColouredStringBuilder::default()
+					.now()
+					.yellow("Warning: ")
+					.normal("Clock still not synced. Continuing anyway.")
+					.eprint();
+			}
+		}
+		None => {
+			ColouredStringBuilder::default()
+				.now()
+				.yellow("Warning: ")
+				.normal("Can't determine whether the system clock is synced on this platform.")
+				.eprint();
+		}
+	}
+}
+
+#[cfg(target_os = "linux")]
+fn clock_synced() -> Option<bool> {
+	let mut tx: libc::timex = unsafe { std::mem::zeroed() }; // modes = 0: only read
+	let state = unsafe { libc::adjtimex(&mut tx) };
+	(state >= 0).then_some(state != libc::TIME_ERROR)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn clock_synced() -> Option<bool> {
+	None
 }

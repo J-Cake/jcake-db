@@ -1,6 +1,4 @@
-use std::borrow::Cow;
 use std::fmt::Display;
-use uuid::Bytes;
 use crate::binary::Timestamp;
 
 pub trait ToBytes {

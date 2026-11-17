@@ -1,77 +1,242 @@
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 
-use axum::{
-	body::Body,
-	extract::Request,
-	http::{header, uri::{PathAndQuery, Scheme}, HeaderValue, Uri},
-	response::Response,
-};
-use chrono::Local;
-use http_body_util::BodyExt;
-use hyper::body::Incoming;
-use hyper_util::{client::legacy::{connect::HttpConnector, Client}, rt::TokioExecutor};
-use serde::{de::DeserializeOwned, Serialize};
 use crate::util::colours::ColouredStringBuilder;
+use chrono::Local;
+use format::Display;
+use format::Error;
 
-pub(crate) type HttpClient = Client<HttpConnector, Body>;
-pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub(crate) mod http {
+	use libc::option;
+use axum::http::HeaderName;
+	use axum::http::HeaderValue;
+	use axum::http::Method;
+	use axum::http::header;
+	use axum_core::body::Body;
+	use format::Display;
+	use format::Error;
+	use http_body_util::BodyExt;
+	use hyper::HeaderMap;
+	use hyper::Request;
+	use hyper::StatusCode;
+	use hyper::Uri;
+	use hyper_util::client::legacy::Client;
+	use hyper_util::client::legacy::connect::HttpConnector;
+	use serde::Serialize;
+	use serde::de::DeserializeOwned;
 
-pub(crate) fn client() -> HttpClient {
-	Client::builder(TokioExecutor::new())
-		.pool_idle_timeout(Duration::from_secs(90))
-		.build_http()
-}
-
-/// http://<addr><path>, IPv6 gets its brackets automatically
-pub(crate) fn peer_uri(addr: SocketAddr, path: &str) -> Result<Uri> {
-	Ok(Uri::builder()
-		.scheme(Scheme::HTTP)
-		.authority(addr.to_string())
-		.path_and_query(path)
-		.build()?)
-}
-
-pub(crate) async fn post_json<T: Serialize, R: DeserializeOwned>(
-	client: &HttpClient, uri: Uri, body: &T,
-) -> Result<R> {
-	let req = Request::post(uri)
-		.header(header::CONTENT_TYPE, "application/json")
-		.body(Body::from(serde_json::to_vec(body)?))?;
-
-	read_json(client.request(req).await?).await
-}
-
-pub(crate) async fn get_json<R: DeserializeOwned>(client: &HttpClient, uri: Uri) -> Result<R> {
-	let req = Request::get(uri).body(Body::empty())?;
-	read_json(client.request(req).await?).await
-}
-
-/// Forwards `req` to `target`. Scheme and host come from `target`,
-/// path and query from the original request.
-pub(crate) async fn forward(client: &HttpClient, target: Uri, mut req: Request) -> Result<Response> {
-	let mut parts = target.into_parts();
-	parts.path_and_query = Some(
-		req.uri().path_and_query().cloned()
-			.unwrap_or_else(|| PathAndQuery::from_static("/")),
-	);
-	*req.uri_mut() = Uri::from_parts(parts)?;
-
-	req.headers_mut().insert("x-jdb-hop", HeaderValue::from_static("1"));
-	req.headers_mut().remove(header::CONNECTION);
-
-	Ok(client.request(req).await?.map(Body::new))
-}
-
-async fn read_json<R: DeserializeOwned>(res: hyper::Response<Incoming>) -> Result<R> {
-	let status = res.status();
-	let bytes = res.into_body().collect().await?.to_bytes();
-
-	if !status.is_success() {
-		return Err(format!("{status}: {}", String::from_utf8_lossy(&bytes)).into());
+	#[macro_export]
+	macro_rules! headers {
+		($($header:literal: $val:literal),*) => {
+			try {
+				let mut headers = HeaderMap::new();
+				$(headers.insert($header, HeaderValue::from_str($val)?);)*
+				headers
+			}
+		}
 	}
-	Ok(serde_json::from_slice(&bytes)?)
+
+	pub(crate) struct HttpClient {
+		client: Client<HttpConnector, Body>,
+		blanket_headers: HeaderMap
+	}
+
+	pub(crate) struct RequestArgs<Body: BodyExt> {
+		pub(crate) method: Method,
+		pub(crate) uri: Uri,
+		pub(crate) headers: HeaderMap,
+		pub(crate) body: Option<Body>
+	}
+
+	#[derive(Debug, Display, Error)]
+	pub(crate) enum RequestError {
+		#[from_err]
+		HttpError(hyper::http::Error),
+
+		#[from_err]
+		RequestError(hyper_util::client::legacy::Error),
+
+		#[from_err]
+		AxumError(axum::Error),
+
+		#[from_err]
+		ContentError(ResponseHandle),
+
+		#[from_err]
+		Utf8Error(std::str::Utf8Error),
+
+		#[from_err]
+		DeserialisationError(super::DeserialisationError),
+
+
+		#[from_err]
+		Miscellaneous(String),
+	}
+
+	#[derive(Debug)]
+	pub(crate) struct ResponseHandle<Body: http_body_util::BodyExt = axum::body::Body> {
+		status: StatusCode,
+		body: Body,
+		headers: HeaderMap
+	}
+
+	impl HttpClient {
+		pub(crate) async fn req(&self, req: RequestArgs<Body>) -> Result<ResponseHandle, RequestError> {
+			let mut builder = Request::builder()
+				.method(req.method)
+				.uri(req.uri);
+
+			if let Some(headers) = builder.headers_mut() {
+				*headers = req.headers;
+			} else {
+				for (name, value) in req.headers.iter() {
+					builder = builder.header(name, value);
+				}
+			}
+
+			for (name, value) in &self.blanket_headers {
+				builder = builder.header(name, value);
+			}
+
+			if let Some(body) = req.body {
+				let res = self.client.request(builder.body(body)?).await?;
+
+				Ok(ResponseHandle {
+					status: res.status(),
+					headers: res.headers().clone(),
+					body: res.body().into(),
+				})
+			} else {
+				let res = self.client.request(builder.body(Body::empty())?).await?;
+
+				Ok(ResponseHandle {
+					status: res.status(),
+					headers: res.headers().clone(),
+					body: res.body().into(),
+				})
+			}
+		}
+
+		async fn handle_json_body<Res: DeserializeOwned>(&self, res: ResponseHandle) -> Result<Res, RequestError> {
+			if !(200u16..300).contains(&res.status.as_u16()) {
+				return Err(res.into())
+			}
+
+			match res.headers.get("Content-Type").map(|val| val.to_str()) {
+				Some(Ok("application/json")) => {
+					let body = res.body.collect().await?
+						.to_bytes()
+						.to_vec();
+
+					Ok(serde_json::from_slice(&body).map_err(Into::into)?)
+				},
+				Some(Ok("application/jsonb")) => {
+					let body = res.body.collect().await?
+						.to_bytes()
+						.to_vec();
+
+					let raw = jsonb::RawJsonb::from(body);
+					Ok(jsonb::from_raw_jsonb(&raw).map_err(Into::into)??)
+				}
+				_ => Err("Response is not in JSON".to_string().into())
+			}
+		}
+
+		pub(crate) async fn get_json<Res: DeserializeOwned>(&self, uri: Uri) -> Result<Res, RequestError> {
+			let res = self.req(RequestArgs {
+				uri,
+				method: Method::GET,
+				headers: headers! {
+					"Accept": "application/json, application/jsonb",
+					"Accept-Encoding": "utf-8"
+				}?,
+				body: None,
+			}).await?;
+
+			self.handle_json_body(res)
+		}
+
+		pub(crate) async fn post_json<Req: Serialize, Res: DeserializeOwned>(&self, uri: Uri, req: Req) -> Result<Res, RequestError> {
+			let body = Body::new(serde_json::to_string(&req)
+				.map_err(Into::into)?);
+
+			let res = self.req(RequestArgs {
+				uri,
+				method: Method::POST,
+				headers: headers! {
+					"Content-Type": "application/json",
+					"Accept": "application/json, application/jsonb",
+					"Accept-Encoding": "utf-8"
+				}?,
+				body: Some(body)
+			}).await?;
+
+			self.handle_json_body(res)
+		}
+
+		pub(crate) async fn forward(&self, req: Request<Body>, to: Uri) -> Result<(), RequestError> {
+			self.req(RequestArgs {
+				uri: to,
+				method: req.method().clone(),
+				headers: req.headers().clone(),
+				body: Some(req.body().into_stream().into())
+			})
+		}
+	}
+
+	impl<Body: BodyExt> RequestArgs<Body> {
+		pub(crate) fn new(method: Method, uri: Uri) -> Self {
+			Self {
+				method,
+				uri,
+				headers: Default::default(),
+				body: None,
+			}
+		}
+
+		pub(crate) fn list_header(mut self, header_name: HeaderName, header_value: HeaderValue) -> Self {
+			self.headers.append(header_name, header_value);
+			self
+		}
+
+		pub(crate) fn header(mut self, header_name: HeaderName, header_value: HeaderValue) -> Self {
+			self.headers.insert(header_name, header_value);
+			self
+		}
+
+		pub(crate) fn sensitive_header(mut self, header_name: HeaderName, mut header_value: HeaderValue) -> Self {
+			header_value.set_sensitive(true);
+			self.headers.insert(header_name, header_value);
+			self
+		}
+
+		pub(crate) fn authorization(self, header_value: HeaderValue) -> Self {
+			self.sensitive_header(header::AUTHORIZATION, header_value)
+		}
+
+		pub(crate) fn content_type(self, header_value: HeaderValue) -> Self {
+			self.header(header::CONTENT_TYPE, header_value)
+		}
+
+		pub(crate) fn content_length(self, header_value: usize) -> Self {
+			self.header(header::CONTENT_LENGTH, HeaderValue::from_str(&header_value.to_string())
+				.expect("Infallible"))
+		}
+
+		pub(crate) fn body(mut self, body: Body) -> Self {
+			self.body.replace(body);
+			self
+		}
+	}
 }
 
+#[derive(Debug, Display, Error)]
+pub(crate) enum DeserialisationError {
+	#[from_err]
+	Json(serde_json::Error),
+
+	#[from_err]
+	Jsonb(jsonb::Error)
+}
 
 pub(crate) fn now() -> String {
 	Local::now().format("%Y-%m-%d %H-%M-%S").to_string()
@@ -107,9 +272,8 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 pub mod colours {
-	use std::fmt::Display;
-	use std::ops::{Deref, DerefMut};
 	use crate::util::now;
+	use std::ops::{Deref, DerefMut};
 
 	const RESET: &str = "\x1b[m";
 
@@ -193,4 +357,12 @@ pub(crate) fn info(msg: impl AsRef<str>) {
 		.now()
 		.normal(msg)
 		.print();
+}
+
+pub(crate) fn error(msg: impl AsRef<str>) {
+	ColouredStringBuilder::default()
+		.now()
+		.red("Error")
+		.normal(msg)
+		.eprint();
 }

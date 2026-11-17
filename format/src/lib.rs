@@ -29,11 +29,80 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{Fields, Ident, ItemStruct, LitByteStr, LitStr, Path, Token, Type};
+use syn::{parse_macro_input, Fields, Ident, ItemStruct, LitByteStr, LitStr, Path, Token, Type, DeriveInput, Data};
 
 /// The crate holding the `binary` module. It must also be nameable from inside
 /// itself, using `extern crate self as util;`.
 const RUNTIME_CRATE: &str = "util";
+
+#[proc_macro_derive(Error, attributes(from_err))]
+pub fn err(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    let name = &input.ident;
+    let (impl_g, ty_g, where_g) = input.generics.split_for_impl();
+
+    let mut from: Vec<TokenStream2> = vec![];
+    let mut src: Vec<TokenStream2> = vec![];
+
+    match input.data {
+        Data::Enum(e) => {
+            for v in &e.variants {
+                if !v.attrs.iter().any(|i| i.path().is_ident("from_err")) {
+                    continue;
+                }
+
+                let ty = match &v.fields {
+                    Fields::Unnamed(fields) if fields.unnamed.len() == 1 => &fields.unnamed[0].ty,
+                    _ => return syn::Error::new_spanned(v, "#[from_err] requires a tuple-type with exactly one argument.")
+                        .into_compile_error()
+                        .into()
+                };
+
+                let variant = &v.ident;
+                from.push(quote! {
+                    impl #impl_g ::core::convert::From<#ty> for #name {
+                        fn from(e: #ty) -> Self { Self::#variant(e) }
+                    }
+                });
+
+                src.push(quote! {
+                    Self::#variant(e) => ::core::option::Option::Some(e),
+                });
+            }
+        }
+        _ => {}
+    }
+
+    quote! {
+        #(#from)*
+
+        impl #impl_g ::std::error::Error for #name #ty_g #where_g {
+            fn source(&self) -> ::core::option::Option<&(dyn ::std::error::Error + 'static)> {
+                #[allow(unreachable_patterns)]
+                match self {
+                    #(#src)*
+                    _ => ::core::option::Option::None
+                }
+            }
+        }
+    }.into()
+}
+
+#[proc_macro_derive(Display)]
+pub fn display(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    let name = &input.ident;
+
+    quote! {
+        impl std::fmt::Display for #name {
+			fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                std::fmt::Debug::fmt(self, f)
+			}
+        }
+    }.into()
+}
 
 #[proc_macro_attribute]
 pub fn binary(args: TokenStream, item: TokenStream) -> TokenStream {

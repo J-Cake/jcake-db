@@ -1,10 +1,12 @@
 #![feature(gethostname)]
+#![feature(try_blocks)]
 
 mod cluster;
-mod db;
+mod local_db;
 mod http;
 mod util;
 
+use crate::local_db::open_db;
 use hyper::StatusCode;
 use crate::util::{now, parse_duration};
 use axum::Json;
@@ -23,7 +25,8 @@ use axum::http::header;
 use axum_core::response::IntoResponse;
 use tokio::net::TcpListener;
 use tokio::net::UnixListener;
-use crate::cluster::{Cluster, ClusterToken};
+use crate::cluster::Cluster;
+use crate::cluster::ClusterToken;
 use crate::cluster::ClusterInner;
 use crate::util::colours::ColouredStringBuilder;
 
@@ -147,7 +150,10 @@ pub async fn main() -> io::Result<()> {
 async fn serve_public(bind: &Bind, app: axum::Router) -> io::Result<()> {
     match bind {
         Bind::Path(path) => {
-            let _ = tokio::fs::remove_file(path).await?;
+            let _ = tokio::fs::remove_file(path).await;
+            #[cfg(not(target_family = "unix"))]
+            panic!("Unix listeners are currently only supported on Unix. Windows support is coming soon.");
+
             axum::serve(UnixListener::bind(path)?, app).await
         },
         Bind::Socket(socket) => axum::serve(TcpListener::bind(socket).await?, app).await,
@@ -170,7 +176,8 @@ async fn log(req: axum::extract::Request, next: Next) -> impl IntoResponse {
         _ => str.normal(res.status().as_str())
     };
 
-    str.normal(method)
+    str.normal(" ")
+        .normal(method)
         .normal(" ")
         .grey(path)
         .print();
