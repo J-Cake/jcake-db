@@ -6,6 +6,7 @@ use format::Display;
 use format::Error;
 
 pub(crate) mod http {
+	use std::time::Duration;
 	use libc::option;
 use axum::http::HeaderName;
 	use axum::http::HeaderValue;
@@ -15,18 +16,21 @@ use axum::http::HeaderName;
 	use format::Display;
 	use format::Error;
 	use http_body_util::BodyExt;
+	use hyper::header::InvalidHeaderValue;
 	use hyper::HeaderMap;
 	use hyper::Request;
 	use hyper::StatusCode;
 	use hyper::Uri;
 	use hyper_util::client::legacy::Client;
 	use hyper_util::client::legacy::connect::HttpConnector;
+	use hyper_util::rt::TokioExecutor;
 	use serde::Serialize;
 	use serde::de::DeserializeOwned;
+	use crate::util::DeserialisationError;
 
 	#[macro_export]
 	macro_rules! headers {
-		($($header:literal: $val:literal),*) => {
+		($($header:literal: $val:expr),*) => {
 			try {
 				let mut headers = HeaderMap::new();
 				$(headers.insert($header, HeaderValue::from_str($val)?);)*
@@ -58,7 +62,7 @@ use axum::http::HeaderName;
 		#[from_err]
 		AxumError(axum::Error),
 
-		#[from_err]
+		#[from_err(no_source)]
 		ContentError(ResponseHandle),
 
 		#[from_err]
@@ -67,8 +71,10 @@ use axum::http::HeaderName;
 		#[from_err]
 		DeserialisationError(super::DeserialisationError),
 
-
 		#[from_err]
+		InvalidHeaderError(InvalidHeaderValue),
+
+		#[from_err(no_source)]
 		Miscellaneous(String),
 	}
 
@@ -80,6 +86,20 @@ use axum::http::HeaderName;
 	}
 
 	impl HttpClient {
+		pub(crate) fn new() -> Self {
+			Self {
+				client: Client::builder(TokioExecutor::new())
+					.pool_idle_timeout(Duration::from_secs(90))
+					.build_http(),
+				blanket_headers: Default::default(),
+			}
+		}
+		
+		pub(crate) fn with_headers(mut self, headers: HeaderMap) -> Self {
+			self.blanket_headers = headers;
+			self
+		}
+
 		pub(crate) async fn req(&self, req: RequestArgs<Body>) -> Result<ResponseHandle, RequestError> {
 			let mut builder = Request::builder()
 				.method(req.method)
@@ -97,23 +117,16 @@ use axum::http::HeaderName;
 				builder = builder.header(name, value);
 			}
 
-			if let Some(body) = req.body {
-				let res = self.client.request(builder.body(body)?).await?;
+			let body = req.body.unwrap_or_else(Body::empty);
+			let (res, incoming) = self.client
+				.request(builder.body(body)?).await?
+				.into_parts();
 
-				Ok(ResponseHandle {
-					status: res.status(),
-					headers: res.headers().clone(),
-					body: res.body().into(),
-				})
-			} else {
-				let res = self.client.request(builder.body(Body::empty())?).await?;
-
-				Ok(ResponseHandle {
-					status: res.status(),
-					headers: res.headers().clone(),
-					body: res.body().into(),
-				})
-			}
+			Ok(ResponseHandle {
+				status: res.status,
+				headers: res.headers,
+				body: Body::new(incoming),
+			})
 		}
 
 		async fn handle_json_body<Res: DeserializeOwned>(&self, res: ResponseHandle) -> Result<Res, RequestError> {
@@ -127,15 +140,15 @@ use axum::http::HeaderName;
 						.to_bytes()
 						.to_vec();
 
-					Ok(serde_json::from_slice(&body).map_err(Into::into)?)
+					Ok(serde_json::from_slice(&body).map_err(DeserialisationError::from)?)
 				},
 				Some(Ok("application/jsonb")) => {
 					let body = res.body.collect().await?
 						.to_bytes()
 						.to_vec();
 
-					let raw = jsonb::RawJsonb::from(body);
-					Ok(jsonb::from_raw_jsonb(&raw).map_err(Into::into)??)
+					let raw = jsonb::RawJsonb::new(&body);
+					Ok(jsonb::from_raw_jsonb(&raw).map_err(DeserialisationError::from)?)
 				}
 				_ => Err("Response is not in JSON".to_string().into())
 			}
@@ -152,12 +165,12 @@ use axum::http::HeaderName;
 				body: None,
 			}).await?;
 
-			self.handle_json_body(res)
+			self.handle_json_body(res).await
 		}
 
 		pub(crate) async fn post_json<Req: Serialize, Res: DeserializeOwned>(&self, uri: Uri, req: Req) -> Result<Res, RequestError> {
 			let body = Body::new(serde_json::to_string(&req)
-				.map_err(Into::into)?);
+				.map_err(DeserialisationError::from)?);
 
 			let res = self.req(RequestArgs {
 				uri,
@@ -170,16 +183,20 @@ use axum::http::HeaderName;
 				body: Some(body)
 			}).await?;
 
-			self.handle_json_body(res)
+			self.handle_json_body(res).await
 		}
 
 		pub(crate) async fn forward(&self, req: Request<Body>, to: Uri) -> Result<(), RequestError> {
+			let (req, body) = req.into_parts();
+
 			self.req(RequestArgs {
 				uri: to,
-				method: req.method().clone(),
-				headers: req.headers().clone(),
-				body: Some(req.body().into_stream().into())
-			})
+				method: req.method,
+				headers: req.headers,
+				body: Some(Body::new(body))
+			}).await?;
+
+			Ok(())
 		}
 	}
 
@@ -272,6 +289,7 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 pub mod colours {
+	use std::fmt::{Debug, Formatter, FormattingOptions};
 	use crate::util::now;
 	use std::ops::{Deref, DerefMut};
 
@@ -279,6 +297,7 @@ pub mod colours {
 
 	macro_rules! colours {
     ($(const $name:ident = $colour:literal;)*) => {
+	    #[allow(unused_variables)]
 	    $(
 		    pub fn $name(mut self, text: impl AsRef<str>) -> Self {
 			    self.str.push_str($colour);
@@ -318,6 +337,16 @@ pub mod colours {
 		pub fn normal(mut self, text: impl AsRef<str>) -> Self {
 			self.str.push_str(text.as_ref());
 			self
+		}
+
+		pub fn dbg(self, text: impl Debug) -> Self {
+			let mut str = String::new();
+			let mut fmt = FormattingOptions::default()
+				.create_formatter(&mut str);
+
+			text.fmt(&mut fmt).expect("Debug logging failed");
+
+			self.normal(str)
 		}
 
 		pub fn now(mut self) -> Self {
@@ -362,7 +391,7 @@ pub(crate) fn info(msg: impl AsRef<str>) {
 pub(crate) fn error(msg: impl AsRef<str>) {
 	ColouredStringBuilder::default()
 		.now()
-		.red("Error")
+		.red("Error: ")
 		.normal(msg)
 		.eprint();
 }

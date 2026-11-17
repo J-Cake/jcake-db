@@ -24,12 +24,13 @@
 //! Values convert through `TryFrom` in both directions.
 
 use proc_macro::TokenStream;
+use std::path::is_separator;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, quote_spanned};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, Fields, Ident, ItemStruct, LitByteStr, LitStr, Path, Token, Type, DeriveInput, Data};
+use syn::{parse_macro_input, Fields, Ident, ItemStruct, LitByteStr, LitStr, Path, Token, Type, DeriveInput, Data, Meta};
 
 /// The crate holding the `binary` module. It must also be nameable from inside
 /// itself, using `extern crate self as util;`.
@@ -48,9 +49,9 @@ pub fn err(input: TokenStream) -> TokenStream {
     match input.data {
         Data::Enum(e) => {
             for v in &e.variants {
-                if !v.attrs.iter().any(|i| i.path().is_ident("from_err")) {
+                let Some(attr) = v.attrs.iter().find(|i| i.path().is_ident("from_err")) else {
                     continue;
-                }
+                };
 
                 let ty = match &v.fields {
                     Fields::Unnamed(fields) if fields.unnamed.len() == 1 => &fields.unnamed[0].ty,
@@ -61,14 +62,30 @@ pub fn err(input: TokenStream) -> TokenStream {
 
                 let variant = &v.ident;
                 from.push(quote! {
-                    impl #impl_g ::core::convert::From<#ty> for #name {
+                    impl #impl_g ::core::convert::From<#ty> for #name #ty_g #where_g {
                         fn from(e: #ty) -> Self { Self::#variant(e) }
                     }
                 });
 
-                src.push(quote! {
-                    Self::#variant(e) => ::core::option::Option::Some(e),
-                });
+                let mut is_source = true;
+                if let syn::Meta::List(_) = attr.meta {
+                    if let Err(err) = attr.parse_nested_meta(|meta| {
+                        if meta.path.is_ident("no_source") {
+                            is_source = false;
+                            Ok(())
+                        } else {
+                            Err(meta.error("unknown #[from_err] option; expected `no_source`"))
+                        }
+                    }) {
+                        return err.into_compile_error().into();
+                    }
+                }
+
+                if is_source {
+                    src.push(quote! {
+                        Self::#variant(e) => ::core::option::Option::Some(e),
+                    });
+                }
             }
         }
         _ => {}

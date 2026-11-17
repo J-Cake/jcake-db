@@ -17,7 +17,7 @@ use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use uuid::Uuid;
-// use db::TypedDatabase;
+use db::TypedDatabase;
 use util::traits::ToBytes;
 use crate::Args;
 use crate::cluster::Cluster;

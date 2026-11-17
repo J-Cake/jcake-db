@@ -1,5 +1,5 @@
-#![feature(gethostname)]
 #![feature(try_blocks)]
+#![feature(formatting_options)]
 
 mod cluster;
 mod local_db;
@@ -32,7 +32,7 @@ use crate::util::colours::ColouredStringBuilder;
 
 #[derive(clap::Parser)]
 struct Args {
-    #[clap(long, default_value = "0.0.0.0:4560", env = "DB_BIND")]
+    #[clap(long, default_value = "[::]:4560", env = "DB_BIND")]
     bind: Bind,
 
     #[clap(long, default_value = "./fs.db", env = "DB_DATABASE_PATH")]
@@ -58,7 +58,7 @@ struct ClusterArgs {
     token: ClusterToken,
 
     /// Socket for cluster-internal traffic (gossip, forwarding)
-    #[arg(long, default_value = "0.0.0.0:7700", env = "DB_GOSSIP_BIND")]
+    #[arg(long, default_value = "[::]:7700", env = "DB_GOSSIP_BIND")]
     gossip_bind: SocketAddr,
 
     #[arg(long, env = "DB_GOSSIP_ADVERTISE")]
@@ -90,12 +90,11 @@ impl FromStr for Bind {
     }
 }
 
-
 #[tokio::main]
 pub async fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    let db = db::open_db(&args).await?;
+    let db = open_db(&args).await?;
     let id = db.id();
 
     let app = axum::Router::new()
@@ -115,12 +114,13 @@ pub async fn main() -> io::Result<()> {
         .layer(axum::extract::DefaultBodyLimit::max(8_388_608)) // 8 MiB to account for JSON losses
         .layer(axum::middleware::from_fn(log));
 
-    util::info(format!("Starting webservice on {socket:?}", socket=&args.bind));
-
     let gossip = match args.mode {
         None => None,
         Some(Mode::Cluster(args)) => {
             let listener = TcpListener::bind(&args.gossip_bind).await?;
+
+            util::info(format!("Starting gossip on {socket:?}", socket=&args.gossip_bind));
+
             let cluster = ClusterInner::new(&args, id).await
                 .map_err(|err| io::Error::other(err.to_string()))?;
 
@@ -148,6 +148,8 @@ pub async fn main() -> io::Result<()> {
 }
 
 async fn serve_public(bind: &Bind, app: axum::Router) -> io::Result<()> {
+    util::info(format!("Starting webservice on {socket:?}", socket=bind));
+
     match bind {
         Bind::Path(path) => {
             let _ = tokio::fs::remove_file(path).await;

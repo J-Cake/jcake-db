@@ -1,3 +1,4 @@
+use crate::header::HeaderMap;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::io;
@@ -18,8 +19,9 @@ use base64::engine::general_purpose::STANDARD as base64_standard;
 use chrono::Utc;
 use tokio::net::UdpSocket;
 use format::Error;
-use crate::ClusterArgs;
+use crate::{headers, ClusterArgs};
 use crate::util::colours::ColouredStringBuilder;
+use crate::util::http::RequestError;
 
 #[derive(Clone)]
 pub(crate) struct ClusterToken {
@@ -39,9 +41,6 @@ impl FromStr for ClusterToken {
 			.unwrap_or(cluster)
 			.split('.')
 			.all(|name| {
-				// max length
-				// all are alphanumeric or `-`
-				// doesn't start or end with `-`
 				(1..=63).contains(&name.len())
 					&& name.bytes().all(|char| char.is_ascii_alphanumeric() || char == b'-')
 					&& !name.starts_with('-')
@@ -71,6 +70,7 @@ impl std::fmt::Debug for ClusterToken {
 #[derive(Debug, Error)]
 pub(crate) enum ClusterError {
 	DnsError(String),
+	InitialisationError(RequestError),
 	TokenError(String),
 	AdvertisingAddressError(String),
 	InvalidClusterName(String)
@@ -93,6 +93,7 @@ impl ClusterError {
 impl Display for ClusterError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			ClusterError::InitialisationError(err) => write!(f, "Error during cluster initialisation: {err}"),
 			ClusterError::DnsError(err) => write!(f, "DNS Error: {err}"),
 			ClusterError::TokenError(err) => write!(f, "Invalid Token: {err}"),
 			ClusterError::AdvertisingAddressError(err) => write!(f, "Malformed Advertising Address: {err}"),
@@ -110,7 +111,7 @@ pub(crate) struct ClusterInner {
 	token: ClusterToken,
 	discover_interval: Duration,
 	member_list: RwLock<BTreeMap<Uuid, Member>>,
-	http: crate::util::HttpClient,
+	http: crate::util::http::HttpClient,
 	ad: SocketAddr,
 }
 
@@ -134,8 +135,8 @@ impl ClusterInner {
 		if args.token.secret.len() < 16 {
 			ColouredStringBuilder::default()
 				.now()
-				.yellow("Warning:")
-				.normal(" The token is less than 16 bytes long. This is not recommended in production scenarios.")
+				.yellow("Warning: ")
+				.normal("The token is less than 16 bytes long. This is not recommended in production scenarios.")
 				.eprint()
 		}
 
@@ -162,7 +163,10 @@ impl ClusterInner {
 					left: false,
 				})
 			])),
-			http: crate::util::HttpClient::new(header),
+			http: crate::util::http::HttpClient::new()
+				.with_headers(headers! {
+					"Authorization": &format!("Bearer {token}", token=base64_standard.encode(&args.token.secret))
+				}.map_err(|err| ClusterError::InitialisationError(RequestError::InvalidHeaderError(err)))?),
 		}))
 	}
 
@@ -188,20 +192,34 @@ impl ClusterInner {
 		let ips = tokio::net::lookup_host((self.token.cluster_id.as_str(), self.ad.port())).await
 			.map_err(|err| ClusterError::DnsError(err.to_string()))?;
 
+		#[cfg(debug_assertions)]
+		let ips = {
+			let ips = ips.collect::<Vec<_>>();
+			ColouredStringBuilder::default()
+				.now()
+				.cyan("Debug: ")
+				.dbg(&ips)
+				.eprint();
+			ips
+		};
+
 		let join = self.join_request().await;
 
 		for name in ips {
-			let Ok(uri) = crate::util::peer_uri(name, "/discovery")
-				.inspect_err(|err| crate::util::error(err.to_string())) else {
-					continue;
-				};
+			let Ok(uri) = Uri::builder()
+				.scheme("http")
+				.authority(name.to_string())
+				.path_and_query("/discovery")
+				.build() else {
+				continue;
+			};
 
-			let Ok(res) = crate::util::post_json::<_, Vec<Member>>(&self.http, uri, &join).await
+			let Ok(res) = self.http.post_json::<_, Discovery>(uri, &join).await
 				.inspect_err(|err| crate::util::error(err.to_string())) else {
 				continue;
 			};
 
-			for member in res {
+			for member in res.known_peers {
 				self.add_member(member).await
 			}
 		}
@@ -237,6 +255,10 @@ impl Member {
 		self.left = self.left || other.left;
 
 		if other.epoch_µs > self.epoch_µs {
+
+			#[cfg(debug_assertions)]
+			crate::util::info(format!("Discovered new member: {ip} ({uuid})", ip=other.addr.ip(), uuid=other.uuid));
+
 			self.epoch_µs = other.epoch_µs;
 			self.addr = other.addr;
 		}
