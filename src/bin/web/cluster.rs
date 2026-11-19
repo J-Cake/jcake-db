@@ -23,7 +23,7 @@ use util::Crc;
 use crate::{headers, ClusterArgs};
 use crate::local_db::RequestIntention;
 use crate::util::colours::ColouredStringBuilder;
-use crate::util::http::RequestError;
+use crate::util::http::{HttpClient, RequestError};
 use crate::util::MaxN;
 
 #[derive(Clone)]
@@ -208,6 +208,10 @@ impl ClusterInner {
 			})
 	}
 
+	pub(crate) fn http(&self) -> &HttpClient {
+		&self.http
+	}
+
 	async fn join_request(&self) -> Discovery {
 		Discovery {
 			known_peers: self.member_list.read()
@@ -281,7 +285,7 @@ impl ClusterInner {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct Member {
-	uuid: Uuid,
+	pub(crate) uuid: Uuid,
 	#[serde(rename = "epoch")]
 	epoch_µs: u64,
 	pub(crate) addr: SocketAddr,

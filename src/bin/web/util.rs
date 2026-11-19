@@ -44,6 +44,7 @@ use axum::http::HeaderName;
 		blanket_headers: HeaderMap
 	}
 
+	#[derive(Default)]
 	pub(crate) struct RequestArgs<Body: BodyExt> {
 		pub(crate) method: Method,
 		pub(crate) uri: Uri,
@@ -130,28 +131,7 @@ use axum::http::HeaderName;
 		}
 
 		async fn handle_json_body<Res: DeserializeOwned>(&self, res: ResponseHandle) -> Result<Res, RequestError> {
-			if !(200u16..300).contains(&res.status.as_u16()) {
-				return Err(res.into())
-			}
-
-			match res.headers.get("Content-Type").map(|val| val.to_str()) {
-				Some(Ok("application/json")) => {
-					let body = res.body.collect().await?
-						.to_bytes()
-						.to_vec();
-
-					Ok(serde_json::from_slice(&body).map_err(DeserialisationError::from)?)
-				},
-				Some(Ok("application/jsonb")) => {
-					let body = res.body.collect().await?
-						.to_bytes()
-						.to_vec();
-
-					let raw = jsonb::RawJsonb::new(&body);
-					Ok(jsonb::from_raw_jsonb(&raw).map_err(DeserialisationError::from)?)
-				}
-				_ => Err("Response is not in JSON".to_string().into())
-			}
+			res.into_json().await
 		}
 
 		pub(crate) async fn get_json<Res: DeserializeOwned>(&self, uri: Uri) -> Result<Res, RequestError> {
@@ -242,6 +222,53 @@ use axum::http::HeaderName;
 		pub(crate) fn body(mut self, body: Body) -> Self {
 			self.body.replace(body);
 			self
+		}
+	}
+
+	impl ResponseHandle {
+		fn into_body(self) -> Body {
+			self.body
+		}
+
+		pub(crate) async fn into_json<De: DeserializeOwned>(self) -> Result<De, RequestError> {
+			if !(200u16..300).contains(&self.status.as_u16()) {
+				return Err(self.into())
+			}
+
+			match self.headers.get("Content-Type").map(|val| val.to_str()) {
+				Some(Ok("application/json")) => {
+					let body = self.body.collect().await?
+						.to_bytes()
+						.to_vec();
+
+					Ok(serde_json::from_slice(&body).map_err(DeserialisationError::from)?)
+				},
+				Some(Ok("application/jsonb")) => {
+					let body = self.body.collect().await?
+						.to_bytes()
+						.to_vec();
+
+					let raw = jsonb::RawJsonb::new(&body);
+					Ok(jsonb::from_raw_jsonb(&raw).map_err(DeserialisationError::from)?)
+				}
+				_ => Err("Response is not in JSON".to_string().into())
+			}
+		}
+
+		pub(crate) fn is_informational(&self) -> bool {
+			self.status.is_informational()
+		}
+		pub(crate) fn is_success(&self) -> bool {
+			self.status.is_success()
+		}
+		pub(crate) fn is_redirection(&self) -> bool {
+			self.status.is_redirection()
+		}
+		pub(crate) fn is_client_error(&self) -> bool {
+			self.status.is_client_error()
+		}
+		pub(crate) fn is_server_error(&self) -> bool {
+			self.status.is_server_error()
 		}
 	}
 }
@@ -386,6 +413,14 @@ pub(crate) fn info(msg: impl AsRef<str>) {
 		.now()
 		.normal(msg)
 		.print();
+}
+
+pub(crate) fn warning(msg: impl AsRef<str>) {
+	ColouredStringBuilder::default()
+		.now()
+		.yellow("Warning: ")
+		.normal(msg)
+		.eprint();
 }
 
 pub(crate) fn error(msg: impl AsRef<str>) {

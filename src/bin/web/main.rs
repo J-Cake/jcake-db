@@ -1,5 +1,6 @@
 #![feature(try_blocks)]
 #![feature(formatting_options)]
+#![feature(unwrap_infallible)]
 
 mod cluster;
 mod local_db;

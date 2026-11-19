@@ -1,6 +1,9 @@
+use std::convert::Infallible;
 use std::io;
 use std::io::Error;
 use std::net::SocketAddr;
+use axum::http::uri::{Parts, Scheme};
+use hyper::{Method, Uri};
 use jaq_core::data;
 use jaq_core::Compiler;
 use jaq_core::Ctx;
@@ -17,11 +20,13 @@ use serde_json::Value;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
+use tokio::task::JoinSet;
 use uuid::Uuid;
 use db::TypedDatabase;
 use util::traits::ToBytes;
 use crate::Args;
 use crate::cluster::Cluster;
+use crate::util::http::{RequestArgs, ResponseHandle};
 
 #[derive(Clone)]
 pub(crate) struct DbHandleInner {
@@ -63,36 +68,63 @@ impl DbHandle {
 		}
 	}
 
+	// async fn msg<Ret: DeserializeOwned>(&self, req: RequestIntention) -> io::Result<Ret> {
+	// 	match self {
+	// 		Self::Local { .. } => self.msg_local(req).await,
+	// 		Self::Cluster { cluster, .. } => match req {
+	// 			RequestIntention::Query(data) => {
+	// 				for members in cluster.members() {
+	//
+	// 				}
+	// 			},
+	// 			RequestIntention::Fetch(uuid) => {
+	// 				let member = cluster.get_owners(uuid).await.first();
+	// 			},
+	// 			RequestIntention::Insert(_) => {
+	//
+	// 			},
+	// 			RequestIntention::Upsert(_, _) => {
+	//
+	// 			},
+	// 			RequestIntention::Delete(uuid) => {
+	// 				let http = cluster.http();
+	// 				let uri = &format!("/{uuid}");
+	//
+	// 				let mut set = JoinSet::new();
+	//
+	// 				for member in cluster.get_owners(uuid).await {
+	// 					set.spawn(async move {
+	// 						http.req(RequestArgs {
+	// 							method: Method::DELETE,
+	// 							uri: Uri::builder()
+	// 								.scheme(Scheme::HTTP)
+	// 								.authority(member.addr.into())
+	// 								.path_and_query(uri)
+	// 								.build()
+	// 								.expect("Failed to build URL"),
+	// 							..Default::default()
+	// 						}).await
+	// 					});
+	// 				}
+	//
+	// 				if set.join_all().await
+	// 					.into_iter()
+	// 					.all(|i| i.is_ok_and(|i| i.is_success())) {
+	// 					return Ok(())
+	// 				} else {
+	// 					Err()
+	// 				}
+	//
+	// 			},
+	// 		}
+	// 	}
+	// }
+
+	// async fn msg_cluster<Ret: DeserializeOwned>(&self, owner: SocketAddr, req: RequestIntention) -> io::Result<Ret> {
+	//
+	// }
+
 	async fn msg<Ret: DeserializeOwned>(&self, req: RequestIntention) -> io::Result<Ret> {
-		match self {
-			Self::Local { .. } => self.msg_local(req).await,
-			Self::Cluster { cluster, .. } => match req {
-				RequestIntention::Query(data) => {
-					for members in cluster.members() {
-
-					}
-				},
-				RequestIntention::Fetch(uuid) => {
-					let member = cluster.get_owners(uuid).await.first();
-				},
-				RequestIntention::Insert(_) => {
-
-				},
-				RequestIntention::Upsert(_, _) => {
-
-				},
-				RequestIntention::Delete(_) => {
-
-				},
-			}
-		}
-	}
-
-	async fn msg_cluster<Ret: DeserializeOwned>(&self, owner: SocketAddr, req: RequestIntention) -> io::Result<Ret> {
-
-	}
-
-	async fn msg_local<Ret: DeserializeOwned>(&self, req: RequestIntention) -> io::Result<Ret> {
 		let (tx, rx) = oneshot::channel::<db::Result<Value>>();
 
 		let req = Request {
@@ -114,7 +146,55 @@ impl DbHandle {
 	}
 
 	pub(crate) async fn query(&self, query: impl ToBytes) -> io::Result<Vec<Value>> {
-		self.msg(RequestIntention::Query(query.to_bytes())).await
+		if let DbHandle::Cluster { cluster, .. } = self {
+			// Collect results from all members
+			let mut set = JoinSet::<io::Result<Vec<Value>>>::new();
+
+			for member in cluster.members().await {
+				set.spawn(async move {
+					let http = cluster.http();
+
+					if member.uuid == self.id() {
+						self.msg(RequestIntention::Query(query.to_bytes())).await
+					} else {
+						let res = http.req(RequestArgs {
+							method: Method::QUERY,
+							uri: Uri::builder()
+								.scheme(Scheme::HTTP)
+								.authority(member.addr.to_string())
+								.path_and_query("/")
+								.build()
+								.expect("Failed to build query URL"),
+							..Default::default()
+						}).await;
+
+						match res {
+							Ok(res) => res.into_json().await
+								.map_err(|err| Error::other(err.to_string())),
+							Err(err) => Err(Error::other(err.to_string()))
+						}
+					}
+				});
+			}
+
+			let (ok, err) = set.join_all().await
+				.into_iter()
+				.partition::<Vec<_>, _>(|i| i.is_ok());
+
+			for err in err.into_iter()
+				.map(|i| i.unwrap_err())
+				.collect::<Vec<_>>() {
+
+				crate::util::warning(format!("Partial result: {err}"));
+			}
+
+			Ok(ok.into_iter()
+				.map(|i| i.unwrap())
+				.flatten()
+				.collect::<Vec<_>>())
+		} else {
+			self.msg(RequestIntention::Query(query.to_bytes())).await
+		}
 	}
 
 	pub(crate) async fn fetch(&self, uuid: Uuid) -> io::Result<Option<Value>> {
