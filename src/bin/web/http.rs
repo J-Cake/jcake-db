@@ -28,9 +28,10 @@ pub(crate) mod method {
 		})
 	}
 }
+
 #[axum::debug_handler]
 pub(crate) async fn query(db: State<DbHandle>, body: Json<String>) -> impl IntoResponse {
-	match db.query(body.0).await {
+	match db.query(body.0).await.into_result() {
 		Ok(data) => (StatusCode::OK, Json(data)).into_response(),
 		Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
 	}
@@ -38,7 +39,7 @@ pub(crate) async fn query(db: State<DbHandle>, body: Json<String>) -> impl IntoR
 
 #[axum::debug_handler]
 pub(crate) async fn fetch(path: Path<(Uuid,)>, db: State<DbHandle>) -> impl IntoResponse {
-	match db.fetch(path.0.0).await {
+	match db.fetch(path.0.0).await.into_result() {
 		Ok(Some(obj)) => (StatusCode::OK, Json(obj)).into_response(),
 		Ok(None) => (
 			StatusCode::NOT_FOUND,
@@ -51,7 +52,7 @@ pub(crate) async fn fetch(path: Path<(Uuid,)>, db: State<DbHandle>) -> impl Into
 
 #[axum::debug_handler]
 pub(crate) async fn insert(db: State<DbHandle>, body: Json<Value>) -> impl IntoResponse {
-	match db.insert(body.0).await {
+	match db.insert(body.0).await.into_result() {
 		Ok(uuid) => (StatusCode::OK, Json(uuid)).into_response(),
 		Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
 	}
@@ -59,7 +60,7 @@ pub(crate) async fn insert(db: State<DbHandle>, body: Json<Value>) -> impl IntoR
 
 #[axum::debug_handler]
 pub(crate) async fn upsert(path: Path<(Uuid,)>, db: State<DbHandle>, body: Json<Value>) -> impl IntoResponse {
-	match db.upsert(path.0.0, body.0).await {
+	match db.upsert(path.0.0, body.0).await.into_result() {
 		Ok(()) => (StatusCode::OK, Json(())).into_response(),
 		Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
 	}
@@ -67,7 +68,7 @@ pub(crate) async fn upsert(path: Path<(Uuid,)>, db: State<DbHandle>, body: Json<
 
 #[axum::debug_handler]
 pub(crate) async fn delete(path: Path<(Uuid,)>, db: State<DbHandle>) -> impl IntoResponse {
-	match db.delete(path.0.0).await {
+	match db.delete(path.0.0).await.into_result() {
 		Ok(()) => (StatusCode::OK, Json(())).into_response(),
 		Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
 	}

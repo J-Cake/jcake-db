@@ -6,6 +6,7 @@ use format::Display;
 use format::Error;
 
 pub(crate) mod http {
+	use std::string::FromUtf8Error;
 	use std::time::Duration;
 	use libc::option;
 use axum::http::HeaderName;
@@ -68,6 +69,9 @@ use axum::http::HeaderName;
 
 		#[from_err]
 		Utf8Error(std::str::Utf8Error),
+
+		#[from_err]
+		FromUtf8Error(FromUtf8Error),
 
 		#[from_err]
 		DeserialisationError(super::DeserialisationError),
@@ -253,6 +257,11 @@ use axum::http::HeaderName;
 				}
 				_ => Err("Response is not in JSON".to_string().into())
 			}
+		}
+
+		pub(crate) async fn into_text(self) -> Result<String, RequestError> {
+			let body = self.body.collect().await?.to_bytes().to_vec();
+			Ok(String::from_utf8(body)?)
 		}
 
 		pub(crate) fn is_informational(&self) -> bool {

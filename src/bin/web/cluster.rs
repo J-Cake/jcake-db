@@ -179,6 +179,10 @@ impl ClusterInner {
 		self.member_list.read().await.values().cloned().collect()
 	}
 
+	pub(crate) fn replicas(&self) -> usize {
+		self.replicas
+	}
+
 	pub(crate) async fn get_owners(&self, uuid: Uuid) -> Vec<Member> {
 		// `max_by_key` returns the last-found maximum of all that are found.
 		// Since this is a BTreeMap, the objects are ordered by UUID already, making them
@@ -284,7 +288,7 @@ impl ClusterInner {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct Member {
+pub(crate) struct Member {
 	pub(crate) uuid: Uuid,
 	#[serde(rename = "epoch")]
 	epoch_µs: u64,

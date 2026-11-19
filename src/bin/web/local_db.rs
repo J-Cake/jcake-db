@@ -2,6 +2,8 @@ use std::convert::Infallible;
 use std::io;
 use std::io::Error;
 use std::net::SocketAddr;
+use std::ops::{ControlFlow, FromResidual, Try};
+use std::sync::Arc;
 use axum::http::uri::{Parts, Scheme};
 use hyper::{Method, Uri};
 use jaq_core::data;
@@ -32,6 +34,31 @@ use crate::util::http::{RequestArgs, ResponseHandle};
 pub(crate) struct DbHandleInner {
 	sender: UnboundedSender<Request>,
 	id: Uuid
+}
+
+#[must_use]
+pub(crate) enum WriteOutcome<T, Err=io::Error> {
+	Success(T),
+	Degraded {
+		success: usize,
+		replicas: usize,
+		value: T,
+		errors: Vec<Err>
+	},
+	Failure(Err)
+}
+
+impl<T, Err: std::fmt::Debug> WriteOutcome<T, Err> {
+	pub(crate) fn into_result(self) -> Result<T, Err> {
+		match self {
+			Self::Success(value) => Ok(value),
+			Self::Degraded { value, errors, success, replicas } => {
+				crate::util::warning(format!("Operation failed for {f}/{t} clients: {errors:?}", f=replicas-success, t=replicas));
+				Ok(value)
+			},
+			Self::Failure(err) => Err(err)
+		}
+	}
 }
 
 #[derive(Clone)]
@@ -68,63 +95,7 @@ impl DbHandle {
 		}
 	}
 
-	// async fn msg<Ret: DeserializeOwned>(&self, req: RequestIntention) -> io::Result<Ret> {
-	// 	match self {
-	// 		Self::Local { .. } => self.msg_local(req).await,
-	// 		Self::Cluster { cluster, .. } => match req {
-	// 			RequestIntention::Query(data) => {
-	// 				for members in cluster.members() {
-	//
-	// 				}
-	// 			},
-	// 			RequestIntention::Fetch(uuid) => {
-	// 				let member = cluster.get_owners(uuid).await.first();
-	// 			},
-	// 			RequestIntention::Insert(_) => {
-	//
-	// 			},
-	// 			RequestIntention::Upsert(_, _) => {
-	//
-	// 			},
-	// 			RequestIntention::Delete(uuid) => {
-	// 				let http = cluster.http();
-	// 				let uri = &format!("/{uuid}");
-	//
-	// 				let mut set = JoinSet::new();
-	//
-	// 				for member in cluster.get_owners(uuid).await {
-	// 					set.spawn(async move {
-	// 						http.req(RequestArgs {
-	// 							method: Method::DELETE,
-	// 							uri: Uri::builder()
-	// 								.scheme(Scheme::HTTP)
-	// 								.authority(member.addr.into())
-	// 								.path_and_query(uri)
-	// 								.build()
-	// 								.expect("Failed to build URL"),
-	// 							..Default::default()
-	// 						}).await
-	// 					});
-	// 				}
-	//
-	// 				if set.join_all().await
-	// 					.into_iter()
-	// 					.all(|i| i.is_ok_and(|i| i.is_success())) {
-	// 					return Ok(())
-	// 				} else {
-	// 					Err()
-	// 				}
-	//
-	// 			},
-	// 		}
-	// 	}
-	// }
-
-	// async fn msg_cluster<Ret: DeserializeOwned>(&self, owner: SocketAddr, req: RequestIntention) -> io::Result<Ret> {
-	//
-	// }
-
-	async fn msg<Ret: DeserializeOwned>(&self, req: RequestIntention) -> io::Result<Ret> {
+	async fn msg<Ret: DeserializeOwned>(&self, req: RequestIntention) -> WriteOutcome<Ret> {
 		let (tx, rx) = oneshot::channel::<db::Result<Value>>();
 
 		let req = Request {
@@ -133,38 +104,48 @@ impl DbHandle {
 		};
 
 		if let Err(_) = self.sender().send(req) {
-			return Err(io::Error::other("Failed to dispatch request"));
+			return WriteOutcome::Failure(io::Error::other("Failed to dispatch request"));
 		};
 
 		let Ok(Ok(res)) = rx.await else {
-			return Err(io::Error::other(
+			return WriteOutcome::Failure(io::Error::other(
 				"An unknown error occurred awaiting a response from the database",
 			));
 		};
 
-		return serde_json::from_value(res).map_err(|err| Error::other(err));
+		match serde_json::from_value(res) {
+			Ok(val) => WriteOutcome::Success(val),
+			Err(err) => WriteOutcome::Failure(io::Error::other(err))
+		}
 	}
 
-	pub(crate) async fn query(&self, query: impl ToBytes) -> io::Result<Vec<Value>> {
+	pub(crate) async fn query(&self, query: impl ToBytes) -> WriteOutcome<Vec<Value>> {
 		if let DbHandle::Cluster { cluster, .. } = self {
 			// Collect results from all members
 			let mut set = JoinSet::<io::Result<Vec<Value>>>::new();
 
 			for member in cluster.members().await {
+				let query = query.to_bytes();
+				let handle = self.clone();
+				let cluster = cluster.clone();
+
 				set.spawn(async move {
 					let http = cluster.http();
 
-					if member.uuid == self.id() {
-						self.msg(RequestIntention::Query(query.to_bytes())).await
+					if member.uuid == handle.id() {
+						handle.msg(RequestIntention::Query(query)).await
+							.into_result()
 					} else {
+						let uri = Uri::builder()
+							.scheme(Scheme::HTTP)
+							.authority(member.addr.to_string())
+							.path_and_query("/")
+							.build()
+							.map_err(|err| io::Error::other(err.to_string()))?;
+
 						let res = http.req(RequestArgs {
+							uri,
 							method: Method::QUERY,
-							uri: Uri::builder()
-								.scheme(Scheme::HTTP)
-								.authority(member.addr.to_string())
-								.path_and_query("/")
-								.build()
-								.expect("Failed to build query URL"),
 							..Default::default()
 						}).await;
 
@@ -177,40 +158,206 @@ impl DbHandle {
 				});
 			}
 
-			let (ok, err) = set.join_all().await
-				.into_iter()
-				.partition::<Vec<_>, _>(|i| i.is_ok());
+			let mut success = 0usize;
+			let mut results = vec![];
+			let mut errors = vec![];
 
-			for err in err.into_iter()
-				.map(|i| i.unwrap_err())
-				.collect::<Vec<_>>() {
-
-				crate::util::warning(format!("Partial result: {err}"));
+			for outcome in set.join_all().await {
+				match outcome {
+					Ok(result) => {
+						success += 1;
+						results.extend_from_slice(&result);
+					},
+					Err(err) => errors.push(err)
+				}
 			}
 
-			Ok(ok.into_iter()
-				.map(|i| i.unwrap())
-				.flatten()
-				.collect::<Vec<_>>())
+			if errors.is_empty() {
+				WriteOutcome::Success(results)
+			} else if success == 0 && !errors.is_empty() {
+				WriteOutcome::Failure(io::Error::other(format!("All clients failed to respond: {errors:?}")))
+			} else {
+				WriteOutcome::Degraded {
+					success,
+					errors,
+					replicas: cluster.replicas(),
+					value: results,
+				}
+			}
 		} else {
 			self.msg(RequestIntention::Query(query.to_bytes())).await
 		}
 	}
 
-	pub(crate) async fn fetch(&self, uuid: Uuid) -> io::Result<Option<Value>> {
-		self.msg(RequestIntention::Fetch(uuid)).await
+	pub(crate) async fn fetch(&self, uuid: Uuid) -> WriteOutcome<Option<Value>> {
+		if let DbHandle::Cluster { cluster, .. } = self {
+			for owner in cluster.get_owners(uuid).await {
+				let Ok(uri) = Uri::builder()
+					.scheme(Scheme::HTTP)
+					.authority(owner.addr.to_string())
+					.path_and_query(format!("/{uuid}"))
+					.build()
+					.inspect_err(|err| crate::util::warning(format!("Constructing URL failed: {err:?}"))) else {
+					continue;
+				};
+
+				match cluster.http().get_json(uri).await {
+					Ok(Some(res)) => return WriteOutcome::Success(Some(res)),
+					Ok(None) => return WriteOutcome::Success(None), // The owner must have it. If we successfully receive nothing, there's no point checking the other owners.
+					Err(err) => crate::util::warning(format!("Fetching from {addr} failed: {err:?}", addr = owner.addr))
+				}
+			}
+
+			WriteOutcome::Success(None)
+		} else {
+			self.msg(RequestIntention::Fetch(uuid)).await
+		}
 	}
 
-	pub(crate) async fn insert(&self, obj: Value) -> io::Result<Uuid> {
-		self.msg(RequestIntention::Insert(obj)).await
+	pub(crate) async fn insert(&self, obj: Value) -> WriteOutcome<Uuid> {
+		if let DbHandle::Cluster { cluster, .. } = self {
+			let uuid = Uuid::new_v4();
+
+			match self.upsert(uuid, obj).await {
+				WriteOutcome::Success(_) => WriteOutcome::Success(uuid),
+				WriteOutcome::Degraded { success, replicas, errors, .. } => WriteOutcome::Degraded {
+					success,
+					replicas,
+					errors,
+					value: uuid,
+				},
+				WriteOutcome::Failure(err) => WriteOutcome::Failure(err)
+			}
+		} else {
+			self.msg(RequestIntention::Insert(obj)).await
+		}
 	}
 
-	pub(crate) async fn upsert(&self, uuid: Uuid, obj: Value) -> io::Result<()> {
-		self.msg(RequestIntention::Upsert(uuid, obj)).await
+	pub(crate) async fn upsert(&self, uuid: Uuid, obj: Value) -> WriteOutcome<()> {
+		if let DbHandle::Cluster { cluster, .. } = self {
+			let mut join = JoinSet::new();
+
+			for owner in cluster.get_owners(uuid).await {
+				let handle = self.clone();
+				let obj = obj.clone();
+				let cluster = cluster.clone();
+
+				join.spawn(async move {
+					if owner.uuid == handle.id() {
+						handle.msg(RequestIntention::Upsert(uuid, obj)).await
+							.into_result()
+					} else {
+						let uri = Uri::builder()
+							.scheme(Scheme::HTTP)
+							.authority(owner.addr.to_string())
+							.path_and_query(format!("/{uuid}"))
+							.build()
+							.map_err(|err| io::Error::other(err.to_string()))?;
+
+						let res = cluster.http().req(RequestArgs {
+							method: Method::PUT,
+							uri,
+							..Default::default()
+						}).await
+							.map_err(|err| Error::other(format!("Insert at {peer} failed: {err}", peer=owner.addr)))?;
+
+						if res.is_success() {
+							Ok(())
+						} else {
+							match res.into_text().await {
+								Ok(err) => Err(Error::other(err)),
+								Err(err) => Err(Error::other(err.to_string()))
+							}
+						}
+					}
+				});
+			}
+
+			let mut success = 0usize;
+			let mut errors = vec![];
+
+			for outcome in join.join_all().await {
+				match outcome {
+					Ok(()) => success += 1,
+					Err(err) => errors.push(err)
+				}
+			}
+
+			if errors.is_empty() {
+				WriteOutcome::Success(())
+			} else if success == 0 && !errors.is_empty() {
+				WriteOutcome::Failure(io::Error::other(format!("All clients failed to update: {errors:?}")))
+			} else {
+				WriteOutcome::Degraded {
+					success,
+					errors,
+					replicas: cluster.replicas(),
+					value: (),
+				}
+			}
+		} else {
+			self.msg(RequestIntention::Upsert(uuid, obj)).await
+		}
 	}
 
-	pub(crate) async fn delete(&self, uuid: Uuid) -> io::Result<()> {
-		self.msg(RequestIntention::Delete(uuid)).await
+	pub(crate) async fn delete(&self, uuid: Uuid) -> WriteOutcome<()> {
+		if let DbHandle::Cluster { cluster, .. } = self {
+			let mut join = JoinSet::new();
+
+			for owner in cluster.get_owners(uuid).await {
+				let handle = self.clone();
+				let cluster = cluster.clone();
+
+				join.spawn(async move {
+					if owner.uuid == handle.id() {
+						handle.msg(RequestIntention::Delete(uuid)).await
+							.into_result()
+					} else {
+						let uri = Uri::builder()
+							.scheme(Scheme::HTTP)
+							.authority(owner.addr.to_string())
+							.path_and_query(format!("/{uuid}"))
+							.build()
+							.map_err(|err| io::Error::other(err.to_string()))?;
+
+						let res = cluster.http().req(RequestArgs {
+							uri,
+							method: Method::DELETE,
+							..Default::default()
+						}).await;
+
+						match res {
+							Ok(_) => Ok(()),
+							Err(err) => Err(io::Error::other(err.to_string()))
+						}
+					}
+				});
+			}
+
+			let mut success = 0usize;
+			let mut errors = vec![];
+			for outcome in join.join_all().await {
+				match outcome {
+					Ok(()) => success += 1,
+					Err(err) => errors.push(err)
+				}
+			}
+
+			if errors.is_empty() {
+				WriteOutcome::Success(())
+			} else if success == 0 && !errors.is_empty() {
+				WriteOutcome::Failure(io::Error::other(format!("All clients failed to delete: {errors:?}")))
+			} else {
+				WriteOutcome::Degraded {
+					success,
+					errors,
+					replicas: cluster.replicas(),
+					value: (),
+				}
+			}
+		} else {
+			self.msg(RequestIntention::Delete(uuid)).await
+		}
 	}
 }
 
