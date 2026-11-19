@@ -1,4 +1,3 @@
-use crate::header::HeaderMap;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::io;
@@ -12,7 +11,8 @@ use axum_core::response::IntoResponse;
 use base64::Engine;
 use clap::error::ErrorKind;
 use hyper::Uri;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use base64::engine::general_purpose::STANDARD as base64_standard;
@@ -20,10 +20,12 @@ use chrono::Utc;
 use tokio::net::UdpSocket;
 use format::Error;
 use util::Crc;
-use crate::{headers, ClusterArgs};
-use crate::local_db::RequestIntention;
+use crate::headers;
+use crate::ClusterArgs;
+use crate::header::HeaderMap;
 use crate::util::colours::ColouredStringBuilder;
-use crate::util::http::{HttpClient, RequestError};
+use crate::util::http::HttpClient;
+use crate::util::http::RequestError;
 use crate::util::MaxN;
 
 #[derive(Clone)]
@@ -45,7 +47,7 @@ impl FromStr for ClusterToken {
 			.split('.')
 			.all(|name| {
 				(1..=63).contains(&name.len())
-					&& name.bytes().all(|char| char.is_ascii_alphanumeric() || char == b'-')
+					&& name.bytes().all(|char| char.is_ascii_alphanumeric() || char == b'-' || char == b'_')
 					&& !name.starts_with('-')
 					&& !name.ends_with('-')
 			}) {

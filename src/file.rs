@@ -11,6 +11,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::hash::BuildHasherDefault;
 use std::hash::Hasher;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::nonpoison::RwLock;
@@ -292,6 +293,22 @@ pub fn open(path: impl AsRef<Path>) -> Result<BlockDriver<fs::File>> {
 }
 
 pub fn blank(path: impl AsRef<Path>) -> Result<BlockDriver<fs::File>> {
+    if let Ok(file) = OpenOptions::new()
+        .read(true)
+        .open(path.as_ref()) {
+        let mut superblock = vec![0u8; 1 << 20];
+
+        match file.read_exact_at(&mut superblock, 0) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        if superblock.iter().any(|i| *i != 0) {
+            return Err(crate::Error::Misc("File not empty".into()))
+        }
+    };
+
     let file = OpenOptions::new()
         .read(true)
         .write(true)

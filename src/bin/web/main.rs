@@ -1,7 +1,5 @@
 #![feature(try_blocks)]
 #![feature(formatting_options)]
-#![feature(unwrap_infallible)]
-#![feature(try_trait_v2)]
 
 mod cluster;
 mod local_db;
@@ -10,7 +8,7 @@ mod util;
 
 use crate::local_db::open_db;
 use hyper::StatusCode;
-use crate::util::{now, parse_duration};
+use crate::util::parse_duration;
 use axum::Json;
 use axum::middleware::Next;
 use clap::Parser;

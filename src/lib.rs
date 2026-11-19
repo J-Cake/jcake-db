@@ -115,19 +115,19 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
 
 impl TypedDatabase<BlockDriver<fs::File>> {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
-        if path.as_ref().exists() {
-            Ok(Self {
-                backing: open(path)?,
+        Ok(match open(&path) {
+            Ok(backing) => Self {
+                backing,
                 mapper: no_index(),
                 content_index: Default::default(),
-            })
-        } else {
-            Ok(Self {
-                backing: blank(path)?,
+            },
+            Err(err) => Self {
+                backing: blank(path)
+                    .map_err(|init| crate::Error::Misc(format!("Failed to open the database, and initialisation failed too - bailing: \n\t{err}\n\t{init}.")))?,
                 mapper: no_index(),
                 content_index: Default::default(),
-            })
-        }
+            }
+        })
     }
 }
 
@@ -157,23 +157,6 @@ macro_rules! items {
         }
     };
 }
-
-// pub enum OwnedOrBorrowed<'a> {
-//     Borrowed(&'a dyn ToBytes),
-//     Owned(Box<dyn ToBytes + 'a>)
-// }
-//
-// impl<'a, T: ToBytes> From<&'a T> for OwnedOrBorrowed<'a> {
-//     fn from(value: &'a T) -> Self {
-//         Self::Borrowed(value)
-//     }
-// }
-//
-// impl<'a> From<Box<dyn ToBytes + 'a>> for OwnedOrBorrowed<'a> {
-//     fn from(value: Box<dyn ToBytes + 'a>) -> Self {
-//         Self::Owned(value)
-//     }
-// }
 
 #[macro_export]
 macro_rules! keys {

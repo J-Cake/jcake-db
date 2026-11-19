@@ -1,10 +1,6 @@
-use std::convert::Infallible;
 use std::io;
 use std::io::Error;
-use std::net::SocketAddr;
-use std::ops::{ControlFlow, FromResidual, Try};
-use std::sync::Arc;
-use axum::http::uri::{Parts, Scheme};
+use axum::http::uri::Scheme;
 use hyper::{Method, Uri};
 use jaq_core::data;
 use jaq_core::Compiler;

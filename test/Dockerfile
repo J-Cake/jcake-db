@@ -12,7 +12,7 @@ WORKDIR /app
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
 	--mount=type=cache,target=/usr/local/cargo/git \
 	--mount=type=cache,target=/app/target \
-    cargo build -Zunstable-options --release --workspace --artifact-dir /opt/jcake-db
+    cargo build -Zunstable-options --features web --release --workspace --artifact-dir /opt/jcake-db
 
 FROM debian:trixie-slim AS run
 LABEL authors="jcake"
