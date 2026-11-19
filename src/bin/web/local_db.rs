@@ -380,7 +380,9 @@ pub(crate) async fn open_db(args: &Args) -> io::Result<DbHandle> {
 	std::thread::Builder::new().name("db-worker".into()).spawn(move || {
 		let mapper = prepare_mapper(&mapper).expect("Invalid extractor function");
 
-		let mut db = TypedDatabase::new(db).expect("Failed to open database").with_mapper(mapper);
+		let mut db = TypedDatabase::new(db)
+			.expect("Failed to open database")
+			.with_mapper(mapper);
 
 		id_tx.send(db.id())
 			.expect("Failed to send DB ID");

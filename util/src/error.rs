@@ -1,10 +1,14 @@
 use std::fmt::Formatter;
+use std::io;
+use std::io::ErrorKind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Error {
     Misc(String),
     EOF,
+    PermissionDenied,
+    DiskFull,
     OversizedPage,
 }
 
@@ -32,6 +36,13 @@ impl Error {
 
 impl From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self {
+        match value.kind() {
+            ErrorKind::UnexpectedEof => return Error::EOF,
+            ErrorKind::PermissionDenied => return Error::PermissionDenied,
+            ErrorKind::StorageFull => return Error::DiskFull,
+            _ => ()
+        };
+
         Self::new(value.to_string())
     }
 }

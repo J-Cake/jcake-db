@@ -1,5 +1,6 @@
 #![feature(try_blocks)]
 #![feature(formatting_options)]
+extern crate core;
 
 mod cluster;
 mod local_db;
