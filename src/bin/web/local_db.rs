@@ -150,7 +150,7 @@ impl DbHandle {
                                 uri,
                                 method: Method::QUERY,
                                 headers: json_headers(),
-                                body: Some(axum::body::Body::from(query))
+                                body: Some(axum::body::Body::from(query.into_vec()))
                             })
                             .await;
 
