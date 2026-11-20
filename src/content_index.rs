@@ -1,18 +1,22 @@
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-use util::binary::Fixed;
-use util::Device;
-use util::traits::ToBytes;
-use crate::object::{ObjectHeader, ObjectKind};
-use crate::{BlockDriver, TypedDatabase};
+use crate::BlockDriver;
+use crate::TypedDatabase;
 use crate::file::Offset;
-use crate::page::{Page, PageHeader};
+use crate::object::ObjectHeader;
+use crate::object::ObjectKind;
+use crate::page::Page;
+use crate::page::PageHeader;
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::HashMap;
+use util::Device;
+use util::binary::Fixed;
+use util::traits::ToBytes;
+use uuid::Uuid;
 
 #[derive(Default, Debug)]
 pub(crate) struct ContentIndexCx {
     forward: HashMap<Bytes, Vec<Uuid>>,
-    backward: HashMap<Uuid, Vec<Bytes>>
+    backward: HashMap<Uuid, Vec<Bytes>>,
 }
 
 impl ContentIndexCx {
@@ -23,9 +27,7 @@ impl ContentIndexCx {
         keys.dedup();
 
         for content in &keys {
-            self.forward.entry(content.clone())
-                .or_default()
-                .push(uuid);
+            self.forward.entry(content.clone()).or_default().push(uuid);
         }
 
         self.backward.insert(uuid, keys);
@@ -48,7 +50,7 @@ impl ContentIndexCx {
         }
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item=(&Bytes, &Vec<Uuid>)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Bytes, &Vec<Uuid>)> {
         self.forward.iter()
     }
 
@@ -63,13 +65,8 @@ struct ContentIndex(Vec<IndexEntry>);
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 enum IndexEntry {
-    Add {
-        data: Vec<Box<[u8]>>,
-        uuid: Uuid,
-    },
-    Remove {
-        uuid: Uuid
-    },
+    Add { data: Vec<Box<[u8]>>, uuid: Uuid },
+    Remove { uuid: Uuid },
 }
 
 type Bytes = Box<[u8]>;
@@ -106,7 +103,10 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
             let start_iterative = last_index
                 .and_then(|i| self.backing.get_location(i.uuid))
                 .map(|i| i.latest())
-                .unwrap_or((0, (PageHeader::SIZE as Offset).next_multiple_of(Page::ALIGNMENT as Offset)));
+                .unwrap_or((
+                    0,
+                    (PageHeader::SIZE as Offset).next_multiple_of(Page::ALIGNMENT as Offset),
+                ));
 
             let mut page_nums = start_iterative.0..;
 
@@ -117,8 +117,8 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
                 let mut page = vec![];
                 for i in items
                     .skip_while(move |i| i.as_ref().is_ok_and(|i| i.position < total_offset))
-                    .filter_map(|i| i.ok()) {
-
+                    .filter_map(|i| i.ok())
+                {
                     if let Some(record) = self.index_record(i) {
                         page.push(record);
                     }
@@ -136,9 +136,7 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
                 };
 
                 let mut records = vec![];
-                for i in page.iter(self.backing.backing.reader())
-                    .filter_map(|i| i.ok()) {
-
+                for i in page.iter(self.backing.backing.reader()).filter_map(|i| i.ok()) {
                     if let Some(record) = self.index_record(i) {
                         records.push(record);
                     }
@@ -161,7 +159,9 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
     }
 
     fn index_record(&self, record: ObjectHeader) -> Option<IndexEntry> {
-        let mut reader = self.backing.backing
+        let mut reader = self
+            .backing
+            .backing
             .reader()
             .with_seek(record.position + ObjectHeader::SIZE as u64);
 
@@ -174,12 +174,10 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
 
                 Some(IndexEntry::Add {
                     uuid: record.uuid,
-                    data: (self.mapper)(&obj)
-                        .into_iter()
-                        .collect(),
+                    data: (self.mapper)(&obj).into_iter().collect(),
                 })
-            },
-            _ => None
+            }
+            _ => None,
         }
     }
 }

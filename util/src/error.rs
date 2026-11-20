@@ -1,7 +1,8 @@
+use serde::Deserialize;
+use serde::Serialize;
 use std::fmt::Formatter;
 use std::io;
 use std::io::ErrorKind;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Error {
@@ -40,7 +41,7 @@ impl From<std::io::Error> for Error {
             ErrorKind::UnexpectedEof => return Error::EOF,
             ErrorKind::PermissionDenied => return Error::PermissionDenied,
             ErrorKind::StorageFull => return Error::DiskFull,
-            _ => ()
+            _ => (),
         };
 
         Self::new(value.to_string())
@@ -49,6 +50,9 @@ impl From<std::io::Error> for Error {
 
 impl From<jsonb::Error> for Error {
     fn from(value: jsonb::Error) -> Self {
-        Self::new(format!("Deserialisation error: {msg}", msg=value.to_string()))
+        Self::new(format!(
+            "Deserialisation error: {msg}",
+            msg = value.to_string()
+        ))
     }
 }

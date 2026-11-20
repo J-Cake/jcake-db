@@ -4,34 +4,34 @@
 #![feature(sync_nonpoison)]
 extern crate core;
 
-mod file;
-mod page;
-mod object;
 mod content_index;
+mod file;
+mod object;
+mod page;
 
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use uuid::Uuid;
-pub use file::BlockDriver;
-pub use util::Device;
-pub use util::Error;
-pub use util::Reader;
-pub use util::Writer;
-pub use util::Result;
-pub use util::traits::ToBytes;
 use crate::content_index::ContentIndexCx;
 use crate::file::blank;
 use crate::file::open;
 use crate::object::Object;
+pub use file::BlockDriver;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+pub use util::Device;
+pub use util::Error;
+pub use util::Reader;
+pub use util::Result;
+pub use util::Writer;
+pub use util::traits::ToBytes;
+use uuid::Uuid;
 
 pub trait ObjectStore: Sized {
     fn id(&self) -> Uuid;
 
     fn compact_db(&mut self) -> Result<()>;
-    fn entries(&self) -> impl Iterator<Item=Object>;
+    fn entries(&self) -> impl Iterator<Item = Object>;
 
     fn fetch(&self, id: Uuid) -> Result<Option<Object>>;
     fn insert(&mut self, data: &[u8]) -> Result<Uuid>;
@@ -42,7 +42,7 @@ pub trait ObjectStore: Sized {
 pub struct TypedDatabase<Db: ObjectStore> {
     backing: Db,
     mapper: Box<dyn Fn(&[u8]) -> Vec<Box<[u8]>>>,
-    content_index: ContentIndexCx
+    content_index: ContentIndexCx,
 }
 
 impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
@@ -72,8 +72,7 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
             return Ok(None);
         };
         let raw = jsonb::RawJsonb::new(&obj);
-        let obj = jsonb::from_raw_jsonb(&raw)
-            .map_err(Into::<Error>::into)?;
+        let obj = jsonb::from_raw_jsonb(&raw).map_err(Into::<Error>::into)?;
 
         Ok(Some(obj))
     }
@@ -83,7 +82,8 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
             return Ok(vec![]);
         };
 
-        matches.into_iter()
+        matches
+            .into_iter()
             .filter_map(|i| self.backing.fetch(*i).transpose())
             .map(|i| i.and_then(|i| i.try_into_parsed()))
             .collect()
@@ -95,7 +95,9 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
         Ok(())
     }
 
-    pub fn with_mapper<Type: Serialize + DeserializeOwned>(mut self, mapper: impl Fn(&Type) -> Vec<Box<[u8]>> + 'static) -> Self {
+    pub fn with_mapper<Type: Serialize + DeserializeOwned>(
+        mut self, mapper: impl Fn(&Type) -> Vec<Box<[u8]>> + 'static,
+    ) -> Self {
         self.mapper = Box::new(move |obj| {
             let obj = jsonb::RawJsonb::new(obj);
             let obj = match jsonb::from_raw_jsonb(&obj) {
@@ -116,18 +118,18 @@ impl<Dev: Device> TypedDatabase<BlockDriver<Dev>> {
 impl TypedDatabase<BlockDriver<fs::File>> {
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         Ok(match open(&path) {
-            Ok(backing) => Self {
-                backing,
-                mapper: no_index(),
-                content_index: Default::default(),
-            },
-            Err(err) => Self {
-                backing: blank(path)
-                    .map_err(|init| crate::Error::Misc(format!("Failed to open the database, and initialisation failed too - bailing: \n\t{err}\n\t{init}.")))?,
-                mapper: no_index(),
-                content_index: Default::default(),
-            }
-        })
+			Ok(backing) => Self {
+				backing,
+				mapper: no_index(),
+				content_index: Default::default(),
+			},
+			Err(err) => Self {
+				backing: blank(path)
+					.map_err(|init| crate::Error::Misc(format!("Failed to open the database, and initialisation failed too - bailing: \n\t{err}\n\t{init}.")))?,
+				mapper: no_index(),
+				content_index: Default::default(),
+			}
+		})
     }
 }
 
@@ -137,30 +139,30 @@ fn no_index() -> Box<dyn Fn(&[u8]) -> Vec<Box<[u8]>>> {
 
 #[macro_export]
 macro_rules! items {
-    ($( $tag:literal => $(#[$meta:meta])* struct $name:ident { $($body:tt)* } )*) => {
-        $(
-            #[derive(Debug, Serialize, Deserialize)]
-            $(#[$meta])*
-            pub struct $name { $($body)* }
+	($( $tag:literal => $(#[$meta:meta])* struct $name:ident { $($body:tt)* } )*) => {
+		$(
+			#[derive(Debug, Serialize, Deserialize)]
+			$(#[$meta])*
+			pub struct $name { $($body)* }
 
-            impl $name {
-                pub fn into_item(self) -> Item {
-                    Item::$name(self)
-                }
-            }
-        )*
+			impl $name {
+				pub fn into_item(self) -> Item {
+					Item::$name(self)
+				}
+			}
+		)*
 
-        #[derive(Debug, Serialize, Deserialize)]
-        #[serde(tag = "type")]
-        pub enum Item {
-            $( #[serde(rename = $tag)] $name($name), )*
-        }
-    };
+		#[derive(Debug, Serialize, Deserialize)]
+		#[serde(tag = "type")]
+		pub enum Item {
+			$( #[serde(rename = $tag)] $name($name), )*
+		}
+	};
 }
 
 #[macro_export]
 macro_rules! keys {
-    ($($e:expr),* $(,)?) => {
-        vec![$( ::db::ToBytes::to_bytes(&$e) ),*]
-    };
+	($($e:expr),* $(,)?) => {
+		vec![$( ::db::ToBytes::to_bytes(&$e) ),*]
+	};
 }

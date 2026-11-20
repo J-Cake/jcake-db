@@ -4,7 +4,9 @@ use crate::Result;
 use crate::object::Object;
 use crate::object::ObjectHeader;
 use crate::object::ObjectKind;
-use crate::page::{Page, PageHeader};
+use crate::page::Page;
+use crate::page::PageHeader;
+use format::binary;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
@@ -17,13 +19,13 @@ use std::sync::Arc;
 use std::sync::nonpoison::RwLock;
 use util::Device;
 use util::Writer;
+use util::binary::Binary;
+use util::binary::Fixed;
 use uuid::Uuid;
-use format::binary;
-use util::binary::{Binary, Fixed};
 
 pub(crate) enum LoadedPage {
     Sealed(Arc<Page>),
-    Open(Page)
+    Open(Page),
 }
 
 impl std::ops::Deref for LoadedPage {
@@ -32,7 +34,7 @@ impl std::ops::Deref for LoadedPage {
     fn deref(&self) -> &Self::Target {
         match self {
             LoadedPage::Sealed(page) => page.as_ref(),
-            LoadedPage::Open(page) => page
+            LoadedPage::Open(page) => page,
         }
     }
 }
@@ -50,7 +52,7 @@ pub struct BlockDriver<Backing: Device> {
     active_page: Option<Page>,
 
     // TODO: purge LRU-style old data.
-    page_headers_cache: RwLock<HashMap<PageNr, Arc<Page>>>
+    page_headers_cache: RwLock<HashMap<PageNr, Arc<Page>>>,
 }
 
 impl<BlockDev: Device> BlockDriver<BlockDev> {
@@ -68,7 +70,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
             page_offset: superblock.page_offset,
             index: None,
             active_page: None,
-            page_headers_cache: RwLock::new(HashMap::new())
+            page_headers_cache: RwLock::new(HashMap::new()),
         };
 
         driver.index()?;
@@ -87,7 +89,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
             active_page: None,
 
             index: Some(Index::with_hasher(BuildHasherDefault::new())),
-            page_headers_cache: RwLock::new(HashMap::new())
+            page_headers_cache: RwLock::new(HashMap::new()),
         };
 
         let superblock = Superblock {
@@ -114,7 +116,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
             let page = Arc::new(page);
             self.page_headers_cache.write().insert(page_nr, page.clone());
 
-            return Ok(LoadedPage::Sealed(page.clone()))
+            return Ok(LoadedPage::Sealed(page.clone()));
         }
 
         page.preload_records(self.backing.reader())?;
@@ -181,7 +183,7 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
 
         for page_nr in max.. {
             if !self.page_exists(page_nr)? {
-                return Ok(page_nr as usize)
+                return Ok(page_nr as usize);
             }
         }
 
@@ -215,16 +217,17 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
         if let None = self.active_page {
             let count = self.page_count()? as PageNr;
 
-            return if count > 0 && let LoadedPage::Open(page) = self.load_page(count - 1)? {
+            return if count > 0
+                && let LoadedPage::Open(page) = self.load_page(count - 1)?
+            {
                 self.active_page.replace(page);
                 Ok(self.active_page.as_mut().expect("Set above"))
             } else {
                 Ok(self.new_page()?)
-            }
+            };
         }
 
-        let have_active = self.active_page.as_ref()
-            .is_some_and(|p| !p.is_sealed());
+        let have_active = self.active_page.as_ref().is_some_and(|p| !p.is_sealed());
 
         if !have_active {
             let start = self.get_last_known_page_nr();
@@ -239,17 +242,19 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
                 }
             }
 
-            return Ok(self.new_page()?)
+            return Ok(self.new_page()?);
         }
 
-        return Ok(self.active_page.as_mut().expect("Set above"))
+        return Ok(self.active_page.as_mut().expect("Set above"));
     }
 
     fn new_page(&mut self) -> Result<&mut Page> {
         let page_nr = if let Some(ref mut page) = self.active_page {
             page.seal(&mut self.backing)?;
             page.seq + 1
-        } else { self.page_count()? as u64 };
+        } else {
+            self.page_count()? as u64
+        };
 
         let mut page = Page::new(page_nr, self.page_size as usize, self.page_offset as u64);
         page.contents.replace(Default::default());
@@ -263,11 +268,10 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
     }
 
     pub(crate) fn get_location(&self, uuid: Uuid) -> Option<&Location> {
-        self.index.as_ref()
-            .and_then(|index| index.get(&uuid.as_u128()))
+        self.index.as_ref().and_then(|index| index.get(&uuid.as_u128()))
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item=ObjectHeader> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = ObjectHeader> {
         gen {
             if let Some(ref index) = self.index {
                 for record in index.values() {
@@ -283,19 +287,13 @@ impl<BlockDev: Device> BlockDriver<BlockDev> {
 }
 
 pub fn open(path: impl AsRef<Path>) -> Result<BlockDriver<fs::File>> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(path.as_ref())?;
+    let file = OpenOptions::new().read(true).write(true).create(true).open(path.as_ref())?;
 
     BlockDriver::open(file)
 }
 
 pub fn blank(path: impl AsRef<Path>) -> Result<BlockDriver<fs::File>> {
-    if let Ok(file) = OpenOptions::new()
-        .read(true)
-        .open(path.as_ref()) {
+    if let Ok(file) = OpenOptions::new().read(true).open(path.as_ref()) {
         let mut superblock = vec![0u8; 1 << 20];
 
         match file.read_exact_at(&mut superblock, 0) {
@@ -305,7 +303,7 @@ pub fn blank(path: impl AsRef<Path>) -> Result<BlockDriver<fs::File>> {
         }
 
         if superblock.iter().any(|i| *i != 0) {
-            return Err(crate::Error::Misc("File not empty".into()))
+            return Err(crate::Error::Misc("File not empty".into()));
         }
     };
 
@@ -366,11 +364,15 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         todo!()
     }
 
-    fn entries(&self) -> impl Iterator<Item = Object> { ObjectIterator(self) }
+    fn entries(&self) -> impl Iterator<Item = Object> {
+        ObjectIterator(self)
+    }
 
     fn fetch(&self, id: Uuid) -> Result<Option<Object>> {
         let Some(ref index) = self.index else {
-            return Err(Error::new("Database is not indexed properly. Please re-open the database"));
+            return Err(Error::new(
+                "Database is not indexed properly. Please re-open the database",
+            ));
         };
 
         let Some(location) = index.get(&id.as_u128()) else {
@@ -411,7 +413,9 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         crc.update(data);
 
         // We've called `.active_page_mut()` enough to be reasonably sure that it's set
-        let page_offset = self.active_page.as_ref()
+        let page_offset = self
+            .active_page
+            .as_ref()
             .and_then(|page| page.next_free(self.backing.reader()))
             .unwrap_or(PageHeader::SIZE as Offset)
             .next_multiple_of(Page::ALIGNMENT as u32);
@@ -430,10 +434,7 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         obj.write(&mut self.backing)?;
         self.backing.append(data)?;
 
-        self.active_page_mut()?
-            .contents
-            .get_or_insert(vec![])
-            .push(obj);
+        self.active_page_mut()?.contents.get_or_insert(vec![]).push(obj);
 
         self.backing.sync()?;
 
@@ -456,7 +457,9 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         crc.update([0u8; 4]);
 
         // We've called `.active_page_mut()` enough to be reasonably sure that it's set
-        let page_offset = self.active_page.as_ref()
+        let page_offset = self
+            .active_page
+            .as_ref()
             .and_then(|page| page.next_free(self.backing.reader()))
             .unwrap_or(PageHeader::SIZE as Offset)
             .next_multiple_of(Page::ALIGNMENT as u32);
@@ -474,15 +477,11 @@ impl<BlockDev: Device> ObjectStore for BlockDriver<BlockDev> {
         self.backing.try_seek_to(seek)?;
         obj.write(&mut self.backing)?;
 
-        self.active_page_mut()?
-            .contents
-            .get_or_insert(vec![])
-            .push(obj);
+        self.active_page_mut()?.contents.get_or_insert(vec![]).push(obj);
 
         self.backing.sync()?;
 
-        self.index.get_or_insert_with(|| Default::default())
-            .remove(&uuid.as_u128());
+        self.index.get_or_insert_with(|| Default::default()).remove(&uuid.as_u128());
 
         Ok(())
     }
@@ -498,7 +497,14 @@ impl<'store, Store: ObjectStore> Iterator for ObjectIterator<'store, Store> {
     }
 }
 
-#[binary(magic(b"fsdb"), Uuid(uuid), u32(version), u32(page_size), u32(page_offset), crc(magic, uuid, version, page_size, page_offset))]
+#[binary(
+    magic(b"fsdb"),
+    Uuid(uuid),
+    u32(version),
+    u32(page_size),
+    u32(page_offset),
+    crc(magic, uuid, version, page_size, page_offset)
+)]
 struct Superblock {
     #[from(uuid)]
     uuid: Uuid,
@@ -510,5 +516,5 @@ struct Superblock {
     page_size: u32,
 
     #[from(page_offset)]
-    page_offset: Offset
+    page_offset: Offset,
 }

@@ -1,15 +1,12 @@
-use std::time::Duration;
-
 use crate::util::colours::ColouredStringBuilder;
 use chrono::Local;
 use format::Display;
 use format::Error;
+use std::time::Duration;
 
 pub(crate) mod http {
-	use std::string::FromUtf8Error;
-	use std::time::Duration;
-	use libc::option;
-use axum::http::HeaderName;
+	use crate::util::DeserialisationError;
+	use axum::http::HeaderName;
 	use axum::http::HeaderValue;
 	use axum::http::Method;
 	use axum::http::header;
@@ -17,17 +14,19 @@ use axum::http::HeaderName;
 	use format::Display;
 	use format::Error;
 	use http_body_util::BodyExt;
-	use hyper::header::InvalidHeaderValue;
 	use hyper::HeaderMap;
 	use hyper::Request;
 	use hyper::StatusCode;
 	use hyper::Uri;
+	use hyper::header::InvalidHeaderValue;
 	use hyper_util::client::legacy::Client;
 	use hyper_util::client::legacy::connect::HttpConnector;
 	use hyper_util::rt::TokioExecutor;
+	use libc::option;
 	use serde::Serialize;
 	use serde::de::DeserializeOwned;
-	use crate::util::DeserialisationError;
+	use std::string::FromUtf8Error;
+	use std::time::Duration;
 
 	#[macro_export]
 	macro_rules! headers {
@@ -42,7 +41,7 @@ use axum::http::HeaderName;
 
 	pub(crate) struct HttpClient {
 		client: Client<HttpConnector, Body>,
-		blanket_headers: HeaderMap
+		blanket_headers: HeaderMap,
 	}
 
 	#[derive(Default)]
@@ -50,7 +49,7 @@ use axum::http::HeaderName;
 		pub(crate) method: Method,
 		pub(crate) uri: Uri,
 		pub(crate) headers: HeaderMap,
-		pub(crate) body: Option<Body>
+		pub(crate) body: Option<Body>,
 	}
 
 	#[derive(Debug, Display, Error)]
@@ -87,7 +86,7 @@ use axum::http::HeaderName;
 	pub(crate) struct ResponseHandle<Body: http_body_util::BodyExt = axum::body::Body> {
 		status: StatusCode,
 		body: Body,
-		headers: HeaderMap
+		headers: HeaderMap,
 	}
 
 	impl HttpClient {
@@ -99,16 +98,14 @@ use axum::http::HeaderName;
 				blanket_headers: Default::default(),
 			}
 		}
-		
+
 		pub(crate) fn with_headers(mut self, headers: HeaderMap) -> Self {
 			self.blanket_headers = headers;
 			self
 		}
 
 		pub(crate) async fn req(&self, req: RequestArgs<Body>) -> Result<ResponseHandle, RequestError> {
-			let mut builder = Request::builder()
-				.method(req.method)
-				.uri(req.uri);
+			let mut builder = Request::builder().method(req.method).uri(req.uri);
 
 			if let Some(headers) = builder.headers_mut() {
 				*headers = req.headers;
@@ -123,9 +120,7 @@ use axum::http::HeaderName;
 			}
 
 			let body = req.body.unwrap_or_else(Body::empty);
-			let (res, incoming) = self.client
-				.request(builder.body(body)?).await?
-				.into_parts();
+			let (res, incoming) = self.client.request(builder.body(body)?).await?.into_parts();
 
 			Ok(ResponseHandle {
 				status: res.status,
@@ -139,33 +134,36 @@ use axum::http::HeaderName;
 		}
 
 		pub(crate) async fn get_json<Res: DeserializeOwned>(&self, uri: Uri) -> Result<Res, RequestError> {
-			let res = self.req(RequestArgs {
-				uri,
-				method: Method::GET,
-				headers: headers! {
-					"Accept": "application/json, application/jsonb",
-					"Accept-Encoding": "utf-8"
-				}?,
-				body: None,
-			}).await?;
+			let res = self
+				.req(RequestArgs {
+					uri,
+					method: Method::GET,
+					headers: headers! {
+						"Accept": "application/json, application/jsonb",
+						"Accept-Encoding": "utf-8"
+					}?,
+					body: None,
+				})
+				.await?;
 
 			self.handle_json_body(res).await
 		}
 
 		pub(crate) async fn post_json<Req: Serialize, Res: DeserializeOwned>(&self, uri: Uri, req: Req) -> Result<Res, RequestError> {
-			let body = Body::new(serde_json::to_string(&req)
-				.map_err(DeserialisationError::from)?);
+			let body = Body::new(serde_json::to_string(&req).map_err(DeserialisationError::from)?);
 
-			let res = self.req(RequestArgs {
-				uri,
-				method: Method::POST,
-				headers: headers! {
-					"Content-Type": "application/json",
-					"Accept": "application/json, application/jsonb",
-					"Accept-Encoding": "utf-8"
-				}?,
-				body: Some(body)
-			}).await?;
+			let res = self
+				.req(RequestArgs {
+					uri,
+					method: Method::POST,
+					headers: headers! {
+						"Content-Type": "application/json",
+						"Accept": "application/json, application/jsonb",
+						"Accept-Encoding": "utf-8"
+					}?,
+					body: Some(body),
+				})
+				.await?;
 
 			self.handle_json_body(res).await
 		}
@@ -177,8 +175,9 @@ use axum::http::HeaderName;
 				uri: to,
 				method: req.method,
 				headers: req.headers,
-				body: Some(Body::new(body))
-			}).await?;
+				body: Some(Body::new(body)),
+			})
+			.await?;
 
 			Ok(())
 		}
@@ -219,8 +218,7 @@ use axum::http::HeaderName;
 		}
 
 		pub(crate) fn content_length(self, header_value: usize) -> Self {
-			self.header(header::CONTENT_LENGTH, HeaderValue::from_str(&header_value.to_string())
-				.expect("Infallible"))
+			self.header(header::CONTENT_LENGTH, HeaderValue::from_str(&header_value.to_string()).expect("Infallible"))
 		}
 
 		pub(crate) fn body(mut self, body: Body) -> Self {
@@ -236,26 +234,23 @@ use axum::http::HeaderName;
 
 		pub(crate) async fn into_json<De: DeserializeOwned>(self) -> Result<De, RequestError> {
 			if !(200u16..300).contains(&self.status.as_u16()) {
-				return Err(self.into())
+				let text = self.into_text().await?;
+				return Err(text.into());
 			}
 
 			match self.headers.get("Content-Type").map(|val| val.to_str()) {
 				Some(Ok("application/json")) => {
-					let body = self.body.collect().await?
-						.to_bytes()
-						.to_vec();
+					let body = self.body.collect().await?.to_bytes().to_vec();
 
 					Ok(serde_json::from_slice(&body).map_err(DeserialisationError::from)?)
-				},
+				}
 				Some(Ok("application/jsonb")) => {
-					let body = self.body.collect().await?
-						.to_bytes()
-						.to_vec();
+					let body = self.body.collect().await?.to_bytes().to_vec();
 
 					let raw = jsonb::RawJsonb::new(&body);
 					Ok(jsonb::from_raw_jsonb(&raw).map_err(DeserialisationError::from)?)
 				}
-				_ => Err("Response is not in JSON".to_string().into())
+				_ => Err("Response is not in JSON".to_string().into()),
 			}
 		}
 
@@ -267,15 +262,19 @@ use axum::http::HeaderName;
 		pub(crate) fn is_informational(&self) -> bool {
 			self.status.is_informational()
 		}
+
 		pub(crate) fn is_success(&self) -> bool {
 			self.status.is_success()
 		}
+
 		pub(crate) fn is_redirection(&self) -> bool {
 			self.status.is_redirection()
 		}
+
 		pub(crate) fn is_client_error(&self) -> bool {
 			self.status.is_client_error()
 		}
+
 		pub(crate) fn is_server_error(&self) -> bool {
 			self.status.is_server_error()
 		}
@@ -288,11 +287,11 @@ pub(crate) enum DeserialisationError {
 	Json(serde_json::Error),
 
 	#[from_err]
-	Jsonb(jsonb::Error)
+	Jsonb(jsonb::Error),
 }
 
 pub(crate) fn now() -> String {
-	Local::now().format("%Y-%m-%d %H-%M-%S").to_string()
+	Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
 pub(crate) fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
@@ -304,11 +303,11 @@ pub(crate) fn parse_duration(s: &str) -> std::result::Result<Duration, String> {
 	let mul = |f: u64| n.checked_mul(f).ok_or_else(|| format!("'{s}' is too large"));
 
 	Ok(match unit.trim() {
-		"µs" | "us"       => Duration::from_micros(n),
-		"ms"              => Duration::from_millis(n),
-		"s" | ""          => Duration::from_secs(n),
-		"m" | "min"       => Duration::from_secs(mul(60)?),
-		"h"               => Duration::from_secs(mul(3600)?),
+		"µs" | "us" => Duration::from_micros(n),
+		"ms" => Duration::from_millis(n),
+		"s" | "" => Duration::from_secs(n),
+		"m" | "min" => Duration::from_secs(mul(60)?),
+		"h" => Duration::from_secs(mul(3600)?),
 		u => return Err(format!("unknown unit '{u}' (µs, ms, s, m, h)")),
 	})
 }
@@ -325,24 +324,27 @@ pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 pub mod colours {
-	use std::fmt::{Debug, Formatter, FormattingOptions};
 	use crate::util::now;
-	use std::ops::{Deref, DerefMut};
+	use std::fmt::Debug;
+	use std::fmt::Formatter;
+	use std::fmt::FormattingOptions;
+	use std::ops::Deref;
+	use std::ops::DerefMut;
 
 	const RESET: &str = "\x1b[m";
 
 	macro_rules! colours {
-    ($(const $name:ident = $colour:literal;)*) => {
-	    #[allow(unused_variables)]
-	    $(
-		    pub fn $name(mut self, text: impl AsRef<str>) -> Self {
-			    self.str.push_str($colour);
-			    self.str.push_str(text.as_ref());
-			    self.str.push_str(RESET);
-			    self
-		    }
-	    )*
-    };
+	($(const $name:ident = $colour:literal;)*) => {
+		#[allow(unused_variables)]
+		$(
+			pub fn $name(mut self, text: impl AsRef<str>) -> Self {
+				self.str.push_str($colour);
+				self.str.push_str(text.as_ref());
+				self.str.push_str(RESET);
+				self
+			}
+		)*
+	};
 }
 
 	#[derive(Default)]
@@ -377,8 +379,7 @@ pub mod colours {
 
 		pub fn dbg(self, text: impl Debug) -> Self {
 			let mut str = String::new();
-			let mut fmt = FormattingOptions::default()
-				.create_formatter(&mut str);
+			let mut fmt = FormattingOptions::default().create_formatter(&mut str);
 
 			text.fmt(&mut fmt).expect("Debug logging failed");
 
@@ -386,7 +387,7 @@ pub mod colours {
 		}
 
 		pub fn now(mut self) -> Self {
-			self.grey(format!("[{now}] ", now=now()))
+			self.grey(format!("[{now}] ", now = now()))
 		}
 
 		pub fn finish(self) -> String {
@@ -394,11 +395,11 @@ pub mod colours {
 		}
 
 		pub fn print(self) {
-			println!("{str}", str=self.str);
+			println!("{str}", str = self.str);
 		}
 
 		pub fn eprint(self) {
-			eprintln!("{str}", str=self.str);
+			eprintln!("{str}", str = self.str);
 		}
 	}
 
@@ -418,32 +419,23 @@ pub mod colours {
 }
 
 pub(crate) fn info(msg: impl AsRef<str>) {
-	ColouredStringBuilder::default()
-		.now()
-		.normal(msg)
-		.print();
+	ColouredStringBuilder::default().now().normal(msg).print();
 }
 
 pub(crate) fn warning(msg: impl AsRef<str>) {
-	ColouredStringBuilder::default()
-		.now()
-		.yellow("Warning: ")
-		.normal(msg)
-		.eprint();
+	ColouredStringBuilder::default().now().yellow("Warning: ").normal(msg).eprint();
 }
 
 pub(crate) fn error(msg: impl AsRef<str>) {
-	ColouredStringBuilder::default()
-		.now()
-		.red("Error: ")
-		.normal(msg)
-		.eprint();
+	ColouredStringBuilder::default().now().red("Error: ").normal(msg).eprint();
 }
 
 pub(crate) trait MaxN: Iterator + Sized {
 	/// The `n` largest items by key, largest first. On ties the later item
 	/// ranks first, matching `max_by_key`.
-	fn max_n_by_key<K: Ord>(self, n: usize, mut key: impl FnMut(&Self::Item) -> K) -> Vec<Self::Item> {
+	fn max_n_by_key<K: Ord>(
+		self, n: usize, mut key: impl FnMut(&Self::Item) -> K,
+	) -> Vec<Self::Item> {
 		let mut top: Vec<(K, Self::Item)> = Vec::with_capacity(n + 1);
 
 		if n == 0 {
@@ -462,9 +454,7 @@ pub(crate) trait MaxN: Iterator + Sized {
 			}
 		}
 
-		top.into_iter()
-			.map(|(_, item)| item)
-			.collect()
+		top.into_iter().map(|(_, item)| item).collect()
 	}
 }
 

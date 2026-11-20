@@ -2,7 +2,7 @@
 // Prints a jcake-db file the way Okteta's Structures tool would show it,
 // using the definitions in ../jcake-db and ../jcake-db-walk.
 //
-//   node okteta/tools/dump.js fs.db                        walk the whole file
+//   node okteta/tools/dump.js fs.db						walk the whole file
 //   node okteta/tools/dump.js fs.db 'Object record' 0x1001c one main.osd structure
 //
 // Invalid fields are marked with ✗ and the reason. Lines after "---" are

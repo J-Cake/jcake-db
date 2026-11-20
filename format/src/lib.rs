@@ -3,8 +3,8 @@
 //! ```ignore
 //! #[binary(magic(b"foot"), u32(summary_len), crc(magic, summary_len))]
 //! struct PageFooter {
-//!     #[from(summary_len)]
-//!     summary: usize,
+//! 	 #[from(summary_len)]
+//! 	 summary: usize,
 //! }
 //! ```
 //!
@@ -24,13 +24,28 @@
 //! Values convert through `TryFrom` in both directions.
 
 use proc_macro::TokenStream;
+use proc_macro2::Span;
+use proc_macro2::TokenStream as TokenStream2;
+use quote::format_ident;
+use quote::quote;
+use quote::quote_spanned;
 use std::path::is_separator;
-use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{format_ident, quote, quote_spanned};
-use syn::parse::{Parse, ParseStream};
+use syn::Data;
+use syn::DeriveInput;
+use syn::Fields;
+use syn::Ident;
+use syn::ItemStruct;
+use syn::LitByteStr;
+use syn::LitStr;
+use syn::Meta;
+use syn::Path;
+use syn::Token;
+use syn::Type;
+use syn::parse::Parse;
+use syn::parse::ParseStream;
+use syn::parse_macro_input;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{parse_macro_input, Fields, Ident, ItemStruct, LitByteStr, LitStr, Path, Token, Type, DeriveInput, Data, Meta};
 
 /// The crate holding the `binary` module. It must also be nameable from inside
 /// itself, using `extern crate self as util;`.
@@ -47,7 +62,7 @@ pub fn err(input: TokenStream) -> TokenStream {
     let mut src: Vec<TokenStream2> = vec![];
 
     match input.data {
-        Data::Enum(e) => {
+        Data::Enum(e) =>
             for v in &e.variants {
                 let Some(attr) = v.attrs.iter().find(|i| i.path().is_ident("from_err")) else {
                     continue;
@@ -55,9 +70,13 @@ pub fn err(input: TokenStream) -> TokenStream {
 
                 let ty = match &v.fields {
                     Fields::Unnamed(fields) if fields.unnamed.len() == 1 => &fields.unnamed[0].ty,
-                    _ => return syn::Error::new_spanned(v, "#[from_err] requires a tuple-type with exactly one argument.")
+                    _ =>
+                        return syn::Error::new_spanned(
+                            v,
+                            "#[from_err] requires a tuple-type with exactly one argument.",
+                        )
                         .into_compile_error()
-                        .into()
+                        .into(),
                 };
 
                 let variant = &v.ident;
@@ -86,8 +105,7 @@ pub fn err(input: TokenStream) -> TokenStream {
                         Self::#variant(e) => ::core::option::Option::Some(e),
                     });
                 }
-            }
-        }
+            },
         _ => {}
     }
 
@@ -103,7 +121,8 @@ pub fn err(input: TokenStream) -> TokenStream {
                 }
             }
         }
-    }.into()
+    }
+    .into()
 }
 
 #[proc_macro_derive(Display)]
@@ -114,11 +133,12 @@ pub fn display(input: TokenStream) -> TokenStream {
 
     quote! {
         impl std::fmt::Display for #name {
-			fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 std::fmt::Debug::fmt(self, f)
-			}
+            }
         }
-    }.into()
+    }
+    .into()
 }
 
 #[proc_macro_attribute]
@@ -155,7 +175,7 @@ pub fn binary(args: TokenStream, item: TokenStream) -> TokenStream {
         #item
         #generated
     }
-        .into()
+    .into()
 }
 
 #[derive(Default)]
@@ -212,9 +232,7 @@ impl Entry {
             }
             Entry::Crc { .. } => Some(quote!(<u32 as #rt::Fixed>::SIZE)),
             Entry::Vec { .. } => None,
-            Entry::Value { ty, .. } => {
-                Some(quote_spanned!(ty.span()=> <#ty as #rt::Fixed>::SIZE))
-            }
+            Entry::Value { ty, .. } => Some(quote_spanned!(ty.span()=> <#ty as #rt::Fixed>::SIZE)),
         }
     }
 }
@@ -344,7 +362,10 @@ fn validate_struct(item: &ItemStruct, errors: &mut Errors) {
         );
     }
     if matches!(item.fields, Fields::Unnamed(_)) {
-        errors.add(item.fields.span(), "#[binary] doesn't support tuple structs");
+        errors.add(
+            item.fields.span(),
+            "#[binary] doesn't support tuple structs",
+        );
     }
 }
 
@@ -398,7 +419,10 @@ fn validate_spec(spec: &Spec, mappings: &[Mapping], errors: &mut Errors) {
         let source = &mapping.source;
 
         if mappings[..index].iter().any(|m| m.source == *source) {
-            errors.add(source.span(), format!("`{source}` is already used by another field"));
+            errors.add(
+                source.span(),
+                format!("`{source}` is already used by another field"),
+            );
         }
 
         match spec.entries.iter().find(|e| e.name() == Some(source)) {
@@ -419,7 +443,10 @@ fn validate_crc(spec: &Spec, crc_index: usize, covers: &[Ident], errors: &mut Er
         let found = spec.entries.iter().position(|e| e.name() == Some(name));
         let Some(position) = found else {
             if spec.ptr.as_ref() == Some(name) {
-                errors.add(name.span(), "crc can't cover a ptr, since it isn't stored on disk");
+                errors.add(
+                    name.span(),
+                    "crc can't cover a ptr, since it isn't stored on disk",
+                );
             } else {
                 errors.add(name.span(), format!("no entry named `{name}`"));
             }
@@ -436,9 +463,9 @@ fn validate_crc(spec: &Spec, crc_index: usize, covers: &[Ident], errors: &mut Er
         }
         if previous.is_some_and(|previous| position != previous + 1) {
             errors.add(
-                name.span(),
-                format!("`{name}` isn't directly after the previous entry; crc ranges must be contiguous"),
-            );
+				name.span(),
+				format!("`{name}` isn't directly after the previous entry; crc ranges must be contiguous"),
+			);
             return;
         }
 
@@ -458,10 +485,7 @@ fn wire(name: &Ident) -> Ident {
 }
 
 fn expand(
-    spec: &Spec,
-    item: &ItemStruct,
-    mappings: &[Mapping],
-    errors: &mut Errors,
+    spec: &Spec, item: &ItemStruct, mappings: &[Mapping], errors: &mut Errors,
 ) -> Option<TokenStream2> {
     validate_struct(item, errors);
     validate_spec(spec, mappings, errors);
@@ -683,10 +707,7 @@ fn parse_prefix(prefix: &[Entry], name: &Ident, rt: &TokenStream2) -> TokenStrea
 
 /// Converts first, so a failed conversion leaves nothing half-written.
 fn serialize_prefix(
-    prefix: &[Entry],
-    mappings: &[Mapping],
-    struct_name: &Ident,
-    rt: &TokenStream2,
+    prefix: &[Entry], mappings: &[Mapping], struct_name: &Ident, rt: &TokenStream2,
 ) -> TokenStream2 {
     let mut conversions = Vec::new();
     let mut writes = Vec::new();
@@ -706,10 +727,8 @@ fn serialize_prefix(
                 });
             }
             Entry::Value { ty, name } => {
-                let mapping = mappings
-                    .iter()
-                    .find(|m| m.source == *name)
-                    .expect("checked by validate_spec");
+                let mapping =
+                    mappings.iter().find(|m| m.source == *name).expect("checked by validate_spec");
                 let (field, field_ty) = (&mapping.field, &mapping.ty);
                 let local = wire(name);
                 let error = message(format!("Invalid field `{field}` in {struct_name}"));
