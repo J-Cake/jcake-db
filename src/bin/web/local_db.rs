@@ -1,7 +1,6 @@
 use crate::Args;
 use crate::cluster::Cluster;
 use crate::util::http::RequestArgs;
-use crate::util::http::ResponseHandle;
 use axum::http::uri::Scheme;
 use db::TypedDatabase;
 use hyper::{header, Method};
@@ -15,15 +14,13 @@ use jaq_core::load::File;
 use jaq_core::load::Loader;
 use jaq_core::unwrap_valr;
 use jaq_json::Val;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use serde_json::json;
 use std::io;
-use std::io::Error;
-use std::net::Shutdown::Write;
+use std::io::{Error};
 use axum::http::{HeaderMap, HeaderValue};
-use hyper::header::HeaderName;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::oneshot;
@@ -121,17 +118,23 @@ impl DbHandle {
         }
     }
 
-    pub(crate) async fn query(&self, query: impl ToBytes) -> WriteOutcome<Vec<Value>> {
+    pub(crate) async fn query(&self, query: impl ToBytes + Serialize) -> WriteOutcome<Vec<Value>> {
         if let DbHandle::Cluster { cluster, .. } = self {
             // Collect results from all members
             let mut set = JoinSet::<io::Result<Vec<Value>>>::new();
             let members = cluster.members().await;
             let num = members.len();
 
+            let body = match serde_json::to_vec(&query) {
+                Ok(body) => axum::body::Bytes::from(body),
+                Err(err) => return WriteOutcome::Failure(io::Error::other(format!("Could not serialise query: {err}"))),
+            };
+
             for member in members {
                 let query = query.to_bytes();
                 let handle = self.clone();
                 let cluster = cluster.clone();
+                let body = body.clone();
 
                 set.spawn(async move {
                     let http = cluster.http();
@@ -145,9 +148,6 @@ impl DbHandle {
                             .path_and_query("/")
                             .build()
                             .map_err(|err| io::Error::other(err.to_string()))?;
-
-                        let body = serde_json::to_vec(&query)
-                            .map_err(|err| io::Error::other(format!("Could not serialise query: {err}")))?;
 
                         let res = http
                             .req(RequestArgs {
