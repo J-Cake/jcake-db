@@ -21,6 +21,7 @@ use serde_json::Value;
 use serde_json::json;
 use std::io;
 use std::io::Error;
+use std::net::Shutdown::Write;
 use axum::http::{HeaderMap, HeaderValue};
 use hyper::header::HeaderName;
 use tokio::sync::mpsc::UnboundedSender;
@@ -145,12 +146,15 @@ impl DbHandle {
                             .build()
                             .map_err(|err| io::Error::other(err.to_string()))?;
 
+                        let body = serde_json::to_vec(&query)
+                            .map_err(|err| io::Error::other(format!("Could not serialise query: {err}")))?;
+
                         let res = http
                             .req(RequestArgs {
                                 uri,
                                 method: Method::QUERY,
                                 headers: json_headers(),
-                                body: Some(axum::body::Body::from(query.into_vec()))
+                                body: Some(axum::body::Body::from(body))
                             })
                             .await;
 
