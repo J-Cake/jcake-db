@@ -50,17 +50,8 @@ impl<T, Err: std::fmt::Debug> WriteOutcome<T, Err> {
     pub(crate) fn into_result(self) -> Result<T, Err> {
         match self {
             Self::Success(value) => Ok(value),
-            Self::Degraded {
-                value,
-                errors,
-                success,
-                replicas,
-            } => {
-                crate::util::warning(format!(
-                    "Operation failed for {f}/{t} clients: {errors:?}",
-                    f = replicas - success,
-                    t = replicas
-                ));
+            Self::Degraded { value, errors, success, replicas } => {
+                crate::util::warning(format!("Operation failed for {f}/{t} clients: {errors:?}", f=replicas-success, t=replicas));
                 Ok(value)
             }
             Self::Failure(err) => Err(err),

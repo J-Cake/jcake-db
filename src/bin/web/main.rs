@@ -121,6 +121,7 @@ async fn bind_cluster(db: DbHandle, public: &Bind, cluster: &ClusterArgs) -> io:
 		.map_err(|err| io::Error::other(err.to_string()))?;
 
 	let gossip = Arc::clone(&cluster);
+	let internal = app(db.clone());
 	let app = app(db.into_cluster(gossip.clone()));
 
 	tokio::spawn(async move { gossip.discovery().await });
@@ -128,7 +129,7 @@ async fn bind_cluster(db: DbHandle, public: &Bind, cluster: &ClusterArgs) -> io:
 	let gossip_router = axum::Router::new()
 		.route("/discovery", method::post(cluster::discovery))
 		.with_state(cluster.clone())
-		.merge(app.clone())
+		.merge(internal)
 		.layer(axum::middleware::from_fn_with_state(cluster, require_token));
 
 	tokio::try_join!(serve_public(public, app), axum::serve(listener, gossip_router))?;
