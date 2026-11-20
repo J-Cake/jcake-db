@@ -95,7 +95,7 @@ page 0. Each page shows:
   - `header`: the object header.
   - `data`: a link to the raw payload bytes.
   - `json`: a link to the payload decoded as JSONB, whose row shows the JSON
-    text. It reads `(not JSONB)` for Raw, Tombstone and Reference objects.
+	text. It reads `(not JSONB)` for Raw, Tombstone and Reference objects.
   - `next`: a link to the object after it.
 - `trailer`: the trailer at the end of the page and, if `num_items` isn't 0,
   a `summary` link to the summary table. Each summary entry's `offset` is a

@@ -57,8 +57,8 @@ struct Document {
 }
 
 let mut db = TypedDatabase::new("./example.db")?;
-    .with_extractor("Index on object kind", |record: MaybeTyped| record.kind)
-    .with_extractor("Project owner", |record: MaybeTyped<Document>| record.kind.and_then(|_| record.data.owner));
+	.with_extractor("Index on object kind", |record: MaybeTyped| record.kind)
+	.with_extractor("Project owner", |record: MaybeTyped<Document>| record.kind.and_then(|_| record.data.owner));
 
 // The database automatically builds indices for basically everything. 
 // The `query` function uses these indices to return a list of objects matching certain criteria 

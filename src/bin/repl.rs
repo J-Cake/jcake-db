@@ -1,10 +1,10 @@
-use serde::Serialize;
-use serde::Deserialize;
-use uuid::Uuid;
 use db::TypedDatabase;
 use db::items;
 use db::keys;
+use serde::Deserialize;
+use serde::Serialize;
 use util::binary::Timestamp;
+use uuid::Uuid;
 
 items! {
     "msg" => struct Message {
@@ -25,18 +25,24 @@ items! {
 type Result<T, Error = db::Error> = core::result::Result<T, Error>;
 
 pub fn main() -> Result<()> {
-    let mut db = TypedDatabase::new("./test/fs.db")?
-        .with_mapper::<Item>(|obj| match obj {
-            Item::Message(msg) => keys![msg.created, msg.from, msg.to],
-            Item::User(user) => keys![user.name.to_lowercase(), user.email.to_lowercase(), user.oidc_uuid]
-        });
+    let mut db = TypedDatabase::new("./test/fs.db")?.with_mapper::<Item>(|obj| match obj {
+        Item::Message(msg) => keys![msg.created, msg.from, msg.to],
+        Item::User(user) => keys![
+            user.name.to_lowercase(),
+            user.email.to_lowercase(),
+            user.oidc_uuid
+        ],
+    });
 
-    let obj = db.insert(User {
-        name: "JCake".to_string(),
-        email: "jakieschneider13@gmail.com".to_string(),
-        registered: chrono::Utc::now(),
-        oidc_uuid: Default::default(),
-    }.into_item())?;
+    let obj = db.insert(
+        User {
+            name: "JCake".to_string(),
+            email: "jakieschneider13@gmail.com".to_string(),
+            registered: chrono::Utc::now(),
+            oidc_uuid: Default::default(),
+        }
+        .into_item(),
+    )?;
 
     // db.delete(obj)?;
 

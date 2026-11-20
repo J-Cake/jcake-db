@@ -32,15 +32,15 @@ libc = "0.2.191"
 
 [features]
 web = [
-    "clap/derive", "clap/env",
-    "axum-core", "axum/macros",
-    "tokio/full",
-    "serde_json",
-    "chrono/now", "chrono/serde",
-    "jaq-core", "jaq-json/serde", "jaq-std",
-    "hyper", "hyper-util/client", "hyper-util/http2", "hyper-util/tokio", "http-body-util",
-    "base64",
-    "hmac", "sha2"
+	"clap/derive", "clap/env",
+	"axum-core", "axum/macros",
+	"tokio/full",
+	"serde_json",
+	"chrono/now", "chrono/serde",
+	"jaq-core", "jaq-json/serde", "jaq-std",
+	"hyper", "hyper-util/client", "hyper-util/http2", "hyper-util/tokio", "http-body-util",
+	"base64",
+	"hmac", "sha2"
 ]
 
 [[bin]]
